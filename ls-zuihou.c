@@ -34,7 +34,7 @@ void err(const char* err_string,int line);
 void display_file(int flag,char *path);
 void display_only(const char *name,int filecolor);
 void ls_l(struct stat file_stat,const char *filepath,int filecolor);
-
+int  ls_R(char *name,int flag);
 
 int main(int argc,char *argv[]){
     char path[PATH_MAX+1];
@@ -46,7 +46,7 @@ int main(int argc,char *argv[]){
 
     for(int i=1;i<argc;i++){
         if(argv[i][0]=='-'){
-            for(int j=1;j<strlen(argv[i]);j++){
+            for(size_t j=1;j<strlen(argv[i]);j++){
                  param[count++]=argv[i][j];
             }
         }
@@ -100,11 +100,11 @@ int main(int argc,char *argv[]){
 
         //是目录
         if(S_ISDIR(buf.st_mode)){
-            if(argv[strlen(argv[i])-1]!='/'){
-                argv[strlen(argv[i])-1]='/';
-                argv[strlen(argv[i])]!='\0';
+            if(path[strlen(argv[i])-1]!='/'){
+                path[strlen(argv[i])-1]='/';
+                path[strlen(argv[i])]='\0';
             }else{
-                argv[strlen(argv[i])]!='\0';
+                path[strlen(argv[i])]='\0';
             }
             //printf("%s\n",path);
             if(chdir(path)==-1){
@@ -189,13 +189,13 @@ void ls_l(struct stat file_stat,const char *filepath,int filecolor){
 
 void display_file(int flag,char *path){
     char name[PATH_MAX+1];
-    char lj[PATH_MAX+1];
+   // char lj[PATH_MAX+1];
     int j=0,filecolor=37;//h=0
     struct stat buf;
 
-    for(int i=0;i<strlen(path);i++){
+    for(size_t i=0;i<strlen(path);i++){
         if(path[i]=='/'){
-            memset(name,"\0",PATH_MAX+1);
+            memset(name,'\0',PATH_MAX+1);
             j=0;
             //h=i
         }
@@ -204,7 +204,7 @@ void display_file(int flag,char *path){
     name[j]='\0';
 
     //判断颜色
-    if(latat(path,&buf)==-1){
+    if(lstat(path,&buf)==-1){
         err("lstat",__LINE__);
     }
     if(S_ISDIR(buf.st_mode))       filecolor=34;	
@@ -215,30 +215,30 @@ void display_file(int flag,char *path){
     if(flag==PARAM_NONE||flag==PARAM_r){
         if(name[0]!='.')    display_only(name,filecolor);
     }
-    else if(flag==PARAM_a)  display_single(name,filecolor);
+    else if(flag==PARAM_a)  display_only(name,filecolor);
     else if(flag==PARAM_l){    
         if(name[0]!='.')   ls_l(buf,name,filecolor);
     }
     else if(flag==PARAM_i){    
         if(name[0]!='.'){
             printf("%7ld ", buf.st_ino);
-            display_none(name, filecolor);
+            display_only(name, filecolor);
         }   
     }
     else if(flag==PARAM_s){    
         if(name[0]!='.'){
             printf("%3ld ", buf.st_blocks/2);
-            display_none(name, filecolor);
+            display_only(name, filecolor);
         }   
     }
     else if(flag==(PARAM_a+PARAM_l))  ls_l(buf,name,filecolor);
     else if(flag==(PARAM_a+PARAM_i)){
         printf("%7ld ", buf.st_ino);
-        display_none(name, filecolor);
+        display_only(name, filecolor);
     }
     else if(flag==(PARAM_a+PARAM_s)){
         printf("%3ld ", buf.st_blocks/2);
-        display_none(name, filecolor);
+        display_only(name, filecolor);
     }
     else if(flag==(PARAM_s+PARAM_l)){
         if(name[0]!='.'){
@@ -250,7 +250,7 @@ void display_file(int flag,char *path){
         if(name[0]!='.'){
             printf("%7ld ", buf.st_ino);
             printf("%3ld ", buf.st_blocks/2);
-            display_none(name, filecolor);
+            display_only(name, filecolor);
         }  
     }
     else if(flag==(PARAM_i+PARAM_l)){
@@ -325,7 +325,7 @@ void display_dir(int flag, char *path){
     for(int i=0;i<count;i++){
         filename[i]=(char*)malloc(sizeof(char)*len);
     }
-    long *filetime=(long)malloc(sizeof(long)*count);
+    long *filetime=(long*)malloc(sizeof(long)*count);
     
     dir=opendir(path);
     if(dir==NULL){
@@ -345,7 +345,7 @@ void display_dir(int flag, char *path){
     if(flag&PARAM_t){
         flag-=PARAM_t;
         for(int i=0;i<count;i++){
-            if(latat(filename[i],&buf)==-1){
+            if(lstat(filename[i],&buf)==-1){
                 err("lstat",__LINE__);
             }
             filetime[i]=buf.st_mtime;
@@ -378,7 +378,7 @@ void display_dir(int flag, char *path){
     
     //总计  含a及不含   
     for(int i=0;i<count;i++){
-        if(latat(filename[i],&buf)==-1){
+        if(lstat(filename[i],&buf)==-1){
                 err("lstat",__LINE__);
             }
         if(flag&PARAM_a){
@@ -423,4 +423,69 @@ void display_dir(int flag, char *path){
     free(filename);
     free(filetime);
     
+}
+
+int  ls_R(char *name,int flag){
+    DIR *dir;
+    struct dirent *entry;
+    struct stat buf;
+    char *name_dir=(char*)malloc(sizeof(char)*1000);
+    int count=0,j=0;
+
+    if(chdir(name)==-1){
+        err("chdir",__LINE__);
+    }
+
+    if(getcwd(name_dir,1000)==NULL){
+        err("getwed",__LINE__);
+        return 0;
+    }
+    printf("%s:\n",name_dir);
+
+    dir=opendir(name);
+    if(dir==NULL){
+        err("opendir",__LINE__);
+    }
+    while((entry = readdir(dir))!=NULL){
+        if(g_maxlen<strlen(entry->d_name))
+            g_maxlen = strlen(entry->d_name);
+        count++;
+    }
+    closedir(dir);
+
+    char **filename=(char**)malloc(sizeof(char*)*(count));   //
+    for(int i=0;i<count;i++){
+        filename[i]=(char*)malloc(sizeof(char)*1024);
+    }
+    
+    dir=opendir(name_dir);
+    if(dir==NULL){
+        err("opendir",__LINE__);
+    }
+    while((entry = readdir(dir))!=NULL){
+        strcat(filename[j++],entry->d_name);//000000000
+    }
+
+    for(int i=0;i<j;h++){
+        display_file(flag,filename[i]);
+    }
+    printf("\n");
+
+    for(int i=0;i<j;i++){
+        if(lstat(filename[i],&buf)==-1){
+            err("lstat",__LINE__);
+            continue;
+        }
+        else if(strcmp(filename[i],"..")==0||strcmp(filename[i],".")==0||!S_ISDIR(buf.st_mode)){
+            continue;
+        }
+        else if(S_ISDIR(buf.st_mode)){
+            if(ls_R(filename[i],flag)!=-1){
+                chdir("../");
+            }
+        }
+        free(filename[i]);
+    }
+    free(name_dir);
+    return 1;
 }
