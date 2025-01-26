@@ -422,30 +422,35 @@ void display_dir(int flag, char *path){
         if(lstat(filename[i],&buf)==-1){
                 err("lstat",__LINE__);
             }
-        printf("00000000\n");
+        
 
         if(flag&PARAM_a){
             total+=buf.st_blocks/2;
-            printf("11111\n");
+            
         }
         else{
-            if(filename[i][0]!='.'){
+            if(filename[i][2]!='.'){
                 total+=buf.st_blocks/2; 
-                printf("2222222\n");
+                
             }
         }
     }
-    printf("%d \n",total );
+    //printf("%d \n",total );
 
     if(flag&PARAM_l ||flag&PARAM_s){
         printf("总计  %d\n",total);
     }
+    
+        
 
     if(flag&PARAM_R){
+        
         if(flag&PARAM_r){
-            flag=flag-PARAM_R;//000000
+            flag=flag-PARAM_R-PARAM_r;//000000
             ls_R(path,flag);
         }else{
+        
+
              flag=flag-PARAM_R;
              ls_R(path,flag);
         }
@@ -472,25 +477,31 @@ void display_dir(int flag, char *path){
     
 
 int  ls_R(char *name,int flag){
+    
     DIR *dir;
     struct dirent *entry;
     struct stat buf;
-    char *name_dir=(char*)malloc(sizeof(char)*1000);
+    char name_dir[1024];
     int count=0,j=0;
-
-    if(chdir(name)==-1){
+   
+     
+    if(chdir(name)<0){
         err("chdir",__LINE__);
     }
 
-    if(getcwd(name_dir,1000)==NULL){
+    if(getcwd(name_dir,1000)<0){
         err("getwed",__LINE__);
         return 0;
     }
     printf("%s:\n",name_dir);
+    
+    
+
 
     dir=opendir(name_dir);
     if(dir==NULL){
         err("opendir",__LINE__);
+        return 0;
     }
     while((entry = readdir(dir))!=NULL){
         if(g_maxlen<strlen(entry->d_name))
@@ -498,6 +509,7 @@ int  ls_R(char *name,int flag){
         count++;
     }
     closedir(dir);
+    
 
     char **filename=(char**)malloc(sizeof(char*)*(count)); 
     memset(filename,0,sizeof(char*)*(count));  //
@@ -511,11 +523,16 @@ int  ls_R(char *name,int flag){
     if(dir==NULL){
         err("opendir",__LINE__);
     }
-    while((entry = readdir(dir))!=NULL){
+    /*while((entry = readdir(dir))!=NULL){
         strcat(filename[j++],entry->d_name);//000000000
-    }
+    }*/
+   for(int i=0;i<count;i++){
+    entry=readdir(dir);
+    strcat(filename[j++],entry->d_name);
+   }
 
-    for(int i=0;i<j;h++){
+    for(int i=0;i<j;i++){
+        
         display_file(flag,filename[i]);
     }
     printf("\n");
@@ -533,9 +550,12 @@ int  ls_R(char *name,int flag){
                 chdir("../");
             }
         }
+       
+ 
+           
         free(filename[i]);
     }
-    free(name_dir);
+    //free(name_dir);
     free(filename);
     closedir(dir);
     return 1;
