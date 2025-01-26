@@ -230,22 +230,30 @@ void display_file(int flag,char *path){
         if(name[0]!='.'){
             printf("%7ld ", buf.st_ino);
             display_only(name, filecolor);
+        printf("\n");
+
         }   
     }
     else if(flag==PARAM_s){    
         if(name[0]!='.'){
             printf("%3ld ", buf.st_blocks/2);
             display_only(name, filecolor);
+        printf("\n");
+
         }   
     }
     else if(flag==(PARAM_a+PARAM_l))  ls_l(buf,name,filecolor);
     else if(flag==(PARAM_a+PARAM_i)){
         printf("%7ld ", buf.st_ino);
         display_only(name, filecolor);
+        printf("\n");
+
     }
     else if(flag==(PARAM_a+PARAM_s)){
         printf("%3ld ", buf.st_blocks/2);
         display_only(name, filecolor);
+        printf("\n");
+
     }
     else if(flag==(PARAM_s+PARAM_l)){
         if(name[0]!='.'){
@@ -258,6 +266,8 @@ void display_file(int flag,char *path){
             printf("%7ld ", buf.st_ino);
             printf("%3ld ", buf.st_blocks/2);
             display_only(name, filecolor);
+        printf("\n");
+
         }  
     }
     else if(flag==(PARAM_i+PARAM_l)){
@@ -285,6 +295,7 @@ void display_file(int flag,char *path){
         printf("%7ld ", buf.st_ino);
         printf("%3ld ", buf.st_blocks/2);
         display_only(name, filecolor);
+        printf("\n");
 
     }
     else if(flag==(PARAM_a+PARAM_i+PARAM_s+PARAM_l)){
@@ -296,7 +307,7 @@ void display_file(int flag,char *path){
 
 
 void display_only(const char *name,int filecolor){
-    char colorname[NAME_MAX + 30];
+    /*char colorname[NAME_MAX + 30];
 	int len,j = 0;
 	len = strlen(name);
     h++;
@@ -318,7 +329,27 @@ void display_only(const char *name,int filecolor){
         
          g_leave_len-=(g_maxlen+10);
        for(int i=0;i<len+6;i++)
-		   printf(" ");
+		   printf(" ");*/
+           
+  int len;
+ char colorname[NAME_MAX + 30];
+  if (g_leave_len < g_maxlen)
+  {
+    printf("\n");
+    g_leave_len = MAXROWLEN;
+  }
+ 
+  len = strlen(name);
+  len = g_maxlen - len;
+ 
+  //printfColor(name, color);
+ sprintf(colorname,"\033[%dm%s\033[0m",filecolor,name);
+       printf(" %-s",colorname);
+  printf(" ");
+ 
+  g_leave_len -= (g_maxlen + 2);
+
+
 }
 
 void display_dir(int flag, char *path){
@@ -423,7 +454,6 @@ void display_dir(int flag, char *path){
                 err("lstat",__LINE__);
             }
         
-
         if(flag&PARAM_a){
             total+=buf.st_blocks/2;
             
@@ -446,7 +476,7 @@ void display_dir(int flag, char *path){
     if(flag&PARAM_R){
         
         if(flag&PARAM_r){
-            flag=flag-PARAM_R-PARAM_r;//000000
+            flag=flag-PARAM_R;//000000
             ls_R(path,flag);
         }else{
         
@@ -457,7 +487,7 @@ void display_dir(int flag, char *path){
     }else{
         if(flag&PARAM_r){
             flag=flag-PARAM_r;
-            for(int i=count-1;i>=0;i++){
+            for(int i=count-1;i>=0;i--){
                 display_file(flag,filename[i]);
             }
         }else{
@@ -485,11 +515,11 @@ int  ls_R(char *name,int flag){
     int count=0,j=0;
    
      
-    if(chdir(name)<0){
+    if(chdir(name)==-1){
         err("chdir",__LINE__);
     }
 
-    if(getcwd(name_dir,1000)<0){
+    if(getcwd(name_dir,1000)==NULL){
         err("getwed",__LINE__);
         return 0;
     }
