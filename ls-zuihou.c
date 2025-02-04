@@ -38,7 +38,7 @@ void ls_l(struct stat file_stat,const char *filepath,int filecolor);
 int  ls_R(char *name,int flag);
 void my_error(const char * err_string,int line);
 
-int main(int argc,char *argv[]){
+/*int main(int argc,char *argv[]){
     char path[PATH_MAX+1];
     int flag=PARAM_NONE;
     char param[1000];
@@ -119,7 +119,80 @@ int main(int argc,char *argv[]){
         else   display_file(flag,path);
 
         printf("\n");
+    
+    return 0;
+    
     }
+}*/
+int main(int argc, char *argv[]) {
+    int flag = PARAM_NONE;
+    struct stat buf;
+    int dir_count = 0;
+    char **dirs = NULL;
+    char path[PATH_MAX];
+    
+
+    // 参数解析
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            for (size_t j = 1; j < strlen(argv[i]); j++) {
+                switch (argv[i][j]) {
+                    case 'a': flag |= PARAM_a; break;
+                    case 'l': flag |= PARAM_l; break;
+                    case 'R': flag |= PARAM_R; break;
+                    case 't': flag |= PARAM_t; break;
+                    case 'r': flag |= PARAM_r; break;
+                    case 'i': flag |= PARAM_i; break;
+                    case 's': flag |= PARAM_s; break;
+                    default: fprintf(stderr, "无效选项: -%c\n", argv[i][j]); exit(EXIT_FAILURE);
+                }
+            }
+        } else {
+            // 动态存储目录参数
+            dirs = realloc(dirs, sizeof(char *) * (dir_count + 1));
+            dirs[dir_count] = strdup(argv[i]);
+            dir_count++;
+        }
+    }
+
+    // 默认处理当前目录
+    if (dir_count == 0) {
+        dirs = malloc(sizeof(char *));
+        dirs[0] = strdup(".");
+        dir_count = 1;
+    }
+
+
+    // 处理所有目录参数
+    for (int i = 0; i < dir_count; i++) {
+        strncpy(path, dirs[i], PATH_MAX - 1);
+        path[PATH_MAX - 1] = '\0';
+
+        if (lstat(path, &buf) == -1) {
+            err(dirs[i], __LINE__);
+            continue; // 跳过错误条目
+        }
+
+        // 统一目录路径格式（结尾添加/）
+        size_t len = strlen(path);
+        if (S_ISDIR(buf.st_mode)) {
+            if (path[len - 1] != '/') {
+                if (len + 1 >= PATH_MAX) {
+                    fprintf(stderr, "路径过长: %s\n", path);
+                    continue;
+                }
+                strcat(path, "/");
+            }
+            //printf("\n%s:\n", path);
+            display_dir(flag, path); // 处理目录
+        } else {
+            display_file(flag, path); // 处理文件
+        }
+
+        free(dirs[i]); // 释放动态分配的内存
+    }
+
+    free(dirs);
     return 0;
 }
 void err(const char* err_string,int line){
