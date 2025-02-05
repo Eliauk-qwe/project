@@ -279,8 +279,8 @@ void display_normal(FileEntry *entries, int count, int term_width, ColumnWidths 
 
 void print_color_name(const char *name, mode_t mode) {
     if (S_ISDIR(mode)) printf("\033[1;34m");
-    else if (S_ISLNK(mode)) printf("\033[1;36m");
-    else if (mode & S_IXUSR) printf("\033[1;32m");
+    else if (S_ISBLK(mode)) printf("\033[1;36m");
+    else if (mode & S_IXUSR) printf("\033[1;33m");
     else printf("\033[0m");
     printf("%s\033[0m", name);
 }
