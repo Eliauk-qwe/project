@@ -1,550 +1,292 @@
 #include <stdio.h>
-#include <dirent.h>
-#include <errno.h>
+#include <linux/limits.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <stdlib.h>
 #include <pwd.h>
 #include <grp.h>
 #include <time.h>
-#include <string.h>
-#include <stdlib.h>
-
-void ls_a(const char *dir_path){
-    DIR *dir;
-    struct dirent *entry;
-    
-    
-    dir=opendir(dir_path);
-    if(dir==NULL){
-        perror("opendir failed");
-        return ;
-    }
-
-    while((entry=readdir(dir))!=NULL){
-        printf("%s\n",entry->d_name);
-    }
-
-    if(closedir(dir)==-1){
-        perror("closedir failed");
-        return ;
-    }
-
-     
-
-
-}
-
-
-void   ls_l(const char*path){
-    typedef struct 
-    {
-        mode_t    mode;
-        nlink_t   links;
-        uid_t     uidname;
-        gid_t     gidname;
-        off_t     sizes;
-        time_t    time;
-        char      filename[100];
-    }file_xx;
-
-    DIR *dir;
-    struct dirent *entry;
-    struct stat  file_stat;
-    file_xx *file=NULL;
-    char fullpath[1024];
-    int file_alloc=10;
-    int count=0,sum=0;
-
-
-    dir=opendir(path);
-    if(dir==NULL){
-        perror("opendir fail");
-        return;
-    }
-
-    file=malloc(file_alloc*sizeof(file_xx));
-    if(file==NULL){
-        perror("malloc faile");
-        closedir(dir);
-        return;
-    }
-
-    while((entry=readdir(dir))!=NULL){
-        if(strcmp(entry->d_name,".")==0 || strcmp(entry->d_name,"..")==0){
-            continue;
-        }
-
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
-
-        stat(fullpath,&file_stat);
-        /*if (stat(fullpath, &file_stat) != 0) {
-            perror("stat fail");
-            continue; // 或者采取其他错误处理措施
-        }*/
-
-       char st_mode[11];
-       mode_t mode =file_stat.st_mode;
-       snprintf(st_mode,sizeof(st_mode),"%c%c%c%c%c%c%c%c%c%c",
-        (S_ISDIR(mode))?'d':'-',//很多种
-        (mode & S_IRUSR)?'r':'-',
-        (mode & S_IWUSR)?'w':'-',
-        (mode & S_IXUSR)?'x':'-',
-        (mode & S_IRGRP)?'r':'-',
-        (mode & S_IWGRP)?'w':'-',
-        (mode & S_IXGRP)?'x':'-',
-        (mode & S_IROTH)?'r':'-',
-        (mode & S_IWOTH)?'w':'-',
-        (mode & S_IXOTH)?'x':'-'
-    );
-
-        struct passwd *uid=getpwuid(file_stat.st_uid);
-        struct group *gid=getgrgid(file_stat.st_gid);
-
-
-        char time_str[30];
-        struct tm *tm_info=localtime(file_stat.st_mtime);
-        strftime(time_str,sizeof(time_str),"%m月 %d %H:%M",tm_info);
-
-        
-        
-        if(count>=file_alloc){
-            file_alloc*=2;
-            file_xx *new_file=realloc(file,file_alloc*sizeof(file_xx));
-            if(new_file==NULL){
-                perror("realloc fail");
-                free(file);
-                closedir(dir);
-                return;
-            }
-            file=new_file;
-
-       }
-
-       strcpy(file[count].mode,st_mode);
-       file[count].links=file_stat.st_nlink;
-       strcpy(file[count].uidname,uid->pw_name);
-       strcpy(file[count].gidname,gid->gr_name);
-       file[count].sizes=file_stat.st_size;
-       strcpy(file[count].time,time_str);
-       strcpy(file[count].filename,entry->d_name);
-
-       sum=sum+file_stat.st_blocks;
-       
-    }
-
-    printf("总计 %d\n",sum);
-
-    for(int i=0;i<count;i++){
-        printf("%s  %u  %s  %s  %ld  %s %s \n",file[i].mode,file[i].links,file[i].uidname,file[i].gidname,file[i].sizes,file[i].time,file[i].filename);
-    }
-
-    free(file);
-    closedir(dir);
-}
-
-
-void ls_R(const char *path){
-    DIR *dir;
-    struct dirent *entry;
-    char now_path[1024];
-    struct stat name;
-    char **is_dir;
-    int i=0,count=0;
-
-
-
-    dir=opendir(path) ;
-    if(dir==NULL){
-        perror("openfir fail");
-        return ;
-    }
-
-    printf("%s:\n",path);
-
-     
-    while((entry=readdir(dir))!=NULL){
-        if(strcmp(entry->d_name,".")==0||strcmp(entry->d_name,"..")==0){
-            continue;
-        }
-        
-        //printf("%s\n",entry->d_name);
-        snprintf(now_path,sizeof(now_path),"%s/%s",path,entry->d_name);
-
-        if(lstat(now_path, &name) == -1) {
-            perror("lstat fail");
-            continue;
-        }
-        
-        
-
-        if(S_ISDIR(name.st_mode)){
-            is_dir=realloc(is_dir,(count+1)*sizeof(char*));//判断
-            /*if (is_dir == NULL) {
-                perror("realloc fail");
-                free(is_dir);
-                closedir(dir);
-                return;
-            }*/
-            is_dir[count]=strdup(now_path);
-            /*if (is_dir[count] == NULL) {
-                perror("strdup fail");
-                free(is_dir);
-                // 注意：这里应该释放之前分配的内存，但为了简化示例，我们省略了这一步
-                // 在实际代码中，您应该添加适当的错误处理和内存释放逻辑
-                closedir(dir);
-                return;
-            }*/
-            count++;
-        }
-
-
-    }
-
-
-    for(int j=0;j<i;j++){
-        ls_R(is_dir[j]);
-        free(is_dir[j]);
-    }
-    free(is_dir);
-
-    closedir(dir);
-
-}
-
-
-
-/*#include <stdio.h>
-#include <stdlib.h>
+#include <unistd.h>
 #include <dirent.h>
-#include <sys/stat.h>
-#include <string.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <ctype.h>
+#include <sys/ioctl.h>
 
-// 假设这个函数已经实现，用于递归地列出目录内容
-void list_directory(const char *path);
+#define PARAM_NONE 0
+#define PARAM_a 1
+#define PARAM_l 2
+#define PARAM_R 4
+#define PARAM_t 8
+#define PARAM_r 16
+#define PARAM_i 32
+#define PARAM_s 64
+#define MAXROWLEN 155
 
-void ls_R(const char *path) {
-    DIR *dir;
-    struct dirent *entry;
-    char now_path[1024]; // 使用静态数组作为临时缓冲区，注意这可能会限制路径的长度
-    struct stat name;
-    char **is_dir;
-    int i = 0, count = 0; // count 用于记录目录的数量
+typedef struct {
+    char name[NAME_MAX + 1];
+    struct stat st;
+} FileEntry;
 
-    dir = opendir(path);
-    if (dir == NULL) {
-        perror("opendir fail");
-        return;
-    }
+typedef struct {
+    int max_inode;
+    int max_blocks;
+    int max_nlink;
+    int max_user;
+    int max_group;
+    int max_size;
+    int max_name;
+} ColumnWidths;
 
-    printf("%s:\n", path);
+void process_path(const char *path, int flag, bool is_root);
+void display_entries(FileEntry *entries, int count, int flag,const char *path);
+int compare_entries(const void *a, const void *b);
+void ls_l(const FileEntry *entry, ColumnWidths *widths, const char *fullpath);
+void print_color_name(const char *name, mode_t mode);
+void handle_error(const char *path);
+void calculate_widths(FileEntry *entries, int count, ColumnWidths *widths, int flag);
+void display_normal(FileEntry *entries, int count, int term_width, ColumnWidths *widths);
 
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
+ColumnWidths global_widths;
 
-        printf("%s\n", entry->d_name);
+int main(int argc, char *argv[]) {
+    int flag = PARAM_NONE;
+    char **paths = NULL;
+    int path_count = 0;
 
-        // 构建完整的路径
-        snprintf(now_path, sizeof(now_path), "%s/%s", path, entry->d_name);
-
-        if (lstat(now_path, &name) == -1) {
-            perror("lstat fail");
-            continue;
-        }
-
-        if (S_ISDIR(name.st_mode)) {
-            // 动态分配内存来存储指向目录路径的指针
-            is_dir = realloc(is_dir, (count + 1) * sizeof(char *));
-            if (is_dir == NULL) {
-                perror("realloc fail");
-                closedir(dir);
-                return;
-            }
-            is_dir[count] = strdup(now_path); // 使用 strdup 来复制字符串，并分配内存
-            if (is_dir[count] == NULL) {
-                perror("strdup fail");
-                // 注意：这里应该释放之前分配的内存，但为了简化示例，我们省略了这一步
-                // 在实际代码中，您应该添加适当的错误处理和内存释放逻辑
-                closedir(dir);
-                return;
-            }
-            count++;
-        }
-    }
-
-    // 递归地列出每个子目录的内容
-    for (int j = 0; j < count; j++) {
-        list_directory(is_dir[j]);
-        free(is_dir[j]); // 释放之前使用 strdup 分配的内存
-    }
-    free(is_dir); // 释放使用 realloc 分配的内存
-
-    closedir(dir);
-}
-
-// 这里应该实现 list_directory 函数，但由于篇幅限制，我们省略了它
-// 它应该接收一个路径作为参数，并列出该路径下的所有文件和目录*/
-
-void  ls_t(const char *path){
-    typedef struct  
-    {
-        char  filename[100];//修改
-        time_t   modifytime;
-    }File;
-     
-
-    DIR *dir;
-    struct dirent *entry;
-    struct stat file_stat;
-    int count=0;
-    char fullpath[1024];
-    File *files=NULL;
-    int files_alloc=10;
-    
-
-    dir=opendir(path);
-    if(dir==NULL){
-        perror("opendir fail");
-        return ;
-    }
-
-    //动态分配FILE数组
-    files = malloc(files_alloc * sizeof(File));
-    if (files == NULL) {
-        perror("malloc fail");
-        closedir(dir);
-        return;
-    }
-
-    while ((entry=readdir(dir))!=NULL)
-    {
-        if(strcmp(entry->d_name,".")==0||strcmp(entry->d_name,"..")==0){
-            continue;
-        }
-        
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);//
-
-        stat(fullpath,&file_stat);//失败
-        /*if (stat(fullpath, &file_stat) != 0) {
-            perror("stat fail");
-            continue; // 或者采取其他错误处理措施
-        }*/
-
-        // 如果数组已满，则重新分配更大的数组
-        if (count >= files_alloc) {
-            files_alloc *= 2;
-            File *new_files = realloc(files, files_alloc * sizeof(File));
-            if (new_files == NULL) {
-                perror("realloc fail");
-                free(files);
-                closedir(dir);
-                return;
-            }
-            files = new_files;
-        }
-
-        strcpy(files[count].filename,entry->d_name);
-        files[count].modifytime=file_stat.st_mtime;
-        count++;
-    }
-    
-    for(int i=0; i<count-1;i++){
-        for(int j=0;j<count-i-1;j++){
-            if(files[j].modifytime<files[j+1].modifytime){
-                //结构体互换
-                File temp=files[j];
-                files[j]=files[j+1];
-                files[j+1]=temp;
-            }
-        }
-    }
-
-    for(int i=0;i<count;i++){
-        printf("%s\n",files[i].filename);
-    }
-
-    free(files);
-    closedir(dir);
-    
-}
-
-
-
-void ls_r(const char *path){
-    DIR *dir;
-    struct dirent *entry;
-    char **return_dir=NULL; 
-    int count=0;
-    int return_dir_alloc=1024;
-    char **t;
-
-    dir=opendir(path);
-    if(dir==NULL){
-        perror("oprndir fail");
-        return ;
-    }
-
-    // 分配初始容量的内存
-    return_dir = malloc(return_dir_alloc * sizeof(char *));
-    if (return_dir == NULL) {
-        perror("malloc fail");
-        closedir(dir);
-        return;
-    }
-
-    while((entry=readdir(dir))!=NULL){
-        if(strcmp(entry->d_name,".")==0 || strcmp(entry->d_name,"..")==0){
-            continue;
-        }
-
-        // 如果达到容量，增加容量
-        if (count == return_dir_alloc) {
-            return_dir_alloc *= 2;
-            t = realloc(return_dir, return_dir_alloc* sizeof(char *));
-            if (t == NULL) {
-                perror("realloc fail");
-                // 释放已分配的内存和已复制的字符串，并关闭目录
-                for (int i = 0; i < count; i++) {
-                    free(return_dir[i]);
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            for (size_t j = 1; j < strlen(argv[i]); j++) {
+                switch (argv[i][j]) {
+                    case 'a': flag |= PARAM_a; break;
+                    case 'l': flag |= PARAM_l; break;
+                    case 'R': flag |= PARAM_R; break;
+                    case 't': flag |= PARAM_t; break;
+                    case 'r': flag |= PARAM_r; break;
+                    case 'i': flag |= PARAM_i; break;
+                    case 's': flag |= PARAM_s; break;
+                    default: 
+                        fprintf(stderr, "无效选项: -%c\n", argv[i][j]);
+                        exit(EXIT_FAILURE);
                 }
-                free(return_dir);
-                closedir(dir);
-                return;
             }
-            return_dir = t;
+        } else {
+            paths = realloc(paths, sizeof(char *) * (path_count + 1));
+            paths[path_count] = strdup(argv[i]);
+            path_count++;
         }
-       
-        return_dir[count]=strdup(entry->d_name);
-        
-        count++;
-
     }
 
-    for(int i=count-1;i>=0;i--){
-        printf("%10s",return_dir[i]);
-        free(return_dir[i]);
-
+    if (path_count == 0) {
+        paths = malloc(sizeof(char *));
+        paths[0] = strdup(".");
+        path_count = 1;
     }
-    free(return_dir);
 
-    closedir(dir);
+    for (int i = 0; i < path_count; i++) {
+        process_path(paths[i], flag, true);
+        free(paths[i]);
+    }
+
+    free(paths);
+    return 0;
 }
 
-
-
-void ls_i(const char *path){
-    DIR *dir;
-    struct dirent *entry;
-    struct stat file_stat;
-    char fullpath[1024];
-    
-    dir=opendir(path);
-    if(dir==NULL){
-        perror("opendir failed");
-        return ;
-    }
-
-    while((entry=readdir(dir))!=NULL){
-        if(strcmp(entry->d_name,".")==0 || strcmp(entry->d_name,"..")==0){
-            continue;
-        }
-
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
-
-        stat(fullpath,&file_stat);
-        /*if (stat(fullpath, &file_stat) != 0) {
-            perror("stat fail");
-            continue; // 或者采取其他错误处理措施
-        }*/
-
-        printf("%lu %s\n",file_stat.st_ino,entry->d_name);
-
-
-    }
-
-    if(closedir(dir)==-1){
-        perror("closedir failed");
-        return ;
-    }
-
-     
-
-
-}
-
-
-void ls_s(const char *path){
-    typedef struct 
-    {
-        blkcnt_t  block;
-        char      filename[100];
-    }blocks;
-
-
-    DIR *dir;
-    struct dirent *entry;
-    struct stat  file_stat;
-    blocks *f=NULL;
-    char fullpath[1024];
-    int f_alloc=10;
-    int count=0,sum=0;
-    
-
-    dir=opendir(path);
-    if(dir==NULL){
-        perror("opendir fail");
+void process_path(const char *path, int flag, bool print_header) {
+    struct stat stat_buf;
+    if (lstat(path, &stat_buf) == -1) {
+        handle_error(path);
         return;
     }
 
-    f=malloc(f_alloc*sizeof(blocks));
-    if(f==NULL){
-        perror("malloc faile");
+    if (S_ISDIR(stat_buf.st_mode)) {
+        if (flag&PARAM_R) printf("%s:\n", path);
+        DIR *dir = opendir(path);
+        if (!dir) {
+            handle_error(path);
+            return;
+        }
+
+        FileEntry *entries = NULL;
+        int entry_count = 0;
+        struct dirent *dirent;
+        char fullpath[PATH_MAX];
+
+        while ((dirent = readdir(dir)) != NULL) {
+            if (!(flag & PARAM_a) && dirent->d_name[0] == '.') continue;
+            snprintf(fullpath, sizeof(fullpath), "%s/%s", path, dirent->d_name);
+            entries = realloc(entries, (entry_count + 1) * sizeof(FileEntry));
+            lstat(fullpath, &entries[entry_count].st);
+            strncpy(entries[entry_count].name, dirent->d_name, NAME_MAX);
+            entry_count++;
+        }
         closedir(dir);
-        return;
-    }
 
-    while((entry=readdir(dir))!=NULL){
-        if(strcmp(entry->d_name,".")==0 || strcmp(entry->d_name,"..")==0){
-            continue;
+        if (flag & (PARAM_t | PARAM_r)) {
+            qsort(entries, entry_count, sizeof(FileEntry), compare_entries);
+            if (flag & PARAM_r) {
+                for (int i = 0; i < entry_count / 2; i++) {
+                    FileEntry tmp = entries[i];
+                    entries[i] = entries[entry_count - i - 1];
+                    entries[entry_count - i - 1] = tmp;
+                }
+            }
         }
 
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        display_entries(entries, entry_count, flag, path);
+        free(entries);
 
-        stat(fullpath,&file_stat);
-        /*if (stat(fullpath, &file_stat) != 0) {
-            perror("stat fail");
-            continue; // 或者采取其他错误处理措施
-        }*/
-        
-        
-        if(count>=f_alloc){
-            f_alloc*=2;
-            blocks *new_f=realloc(f,f_alloc*sizeof(blocks));
-            if(new_f==NULL){
-                perror("realloc fail");
-                free(f);
-                closedir(dir);
-                return;
+        if (flag & PARAM_R) {
+            dir = opendir(path);
+            while ((dirent = readdir(dir)) != NULL) {
+                if (strcmp(dirent->d_name, ".") == 0 || strcmp(dirent->d_name, "..") == 0) continue;
+                snprintf(fullpath, sizeof(fullpath), "%s/%s", path, dirent->d_name);
+                lstat(fullpath, &stat_buf);
+                if (S_ISDIR(stat_buf.st_mode)) {
+                    process_path(fullpath, flag, true);
+                }
             }
-            f=new_f;
+            closedir(dir);
+        }
+    } else {
+        FileEntry entry;
+        strncpy(entry.name, path, NAME_MAX);
+        entry.st = stat_buf;
+        display_entries(&entry, 1, flag, path);
+    }
+}
+int compare_entries(const void *a, const void *b) {
+    const FileEntry *ea = (const FileEntry *)a;
+    const FileEntry *eb = (const FileEntry *)b;
+    if (ea->st.st_mtime != eb->st.st_mtime)
+        return (eb->st.st_mtime > ea->st.st_mtime) ? 1 : -1;
+    return strcasecmp(ea->name, eb->name);
+}
 
-       }
+void calculate_widths(FileEntry *entries, int count, ColumnWidths *widths, int flag) {
+    memset(widths, 0, sizeof(ColumnWidths));
+    for (int i = 0; i < count; i++) {
+        // 计算inode列宽
+        if (flag & PARAM_i) {
+            int len = snprintf(NULL, 0, "%lu", entries[i].st.st_ino);
+            if (len > widths->max_inode) widths->max_inode = len;
+        }
+        // 计算块大小列宽
+        if (flag & PARAM_s) {
+            int len = snprintf(NULL, 0, "%ld", entries[i].st.st_blocks/2);
+            if (len > widths->max_blocks) widths->max_blocks = len;
+        }
+    }
+}
 
-       strcpy(f[count].filename,entry->d_name);
-       f[count].block=file_stat.st_blocks;
-       sum=sum+file_stat.st_blocks;
-       
+void display_entries(FileEntry *entries, int count, int flag,const char *path) {
+    if (count == 0) return;
+
+    ColumnWidths widths;
+    calculate_widths(entries, count, &widths, flag);
+
+    // 显示总用量（-s参数）
+    if (flag & (PARAM_l | PARAM_s)) {
+        long total = 0;
+        for (int i = 0; i < count; i++) total += entries[i].st.st_blocks;
+        printf("总用量 %ld\n", total/2);
     }
 
-    printf("总计 %d\n",sum);
+    // 长格式输出
+    if (flag & PARAM_l) {
+        for (int i = 0; i < count; i++) {
+            // 显示inode号
+            if (flag & PARAM_i) printf("%*lu ", widths.max_inode, entries[i].st.st_ino);
+            // 显示块大小
+            if (flag & PARAM_s) printf("%*ld ", widths.max_blocks, entries[i].st.st_blocks/2);
+            
+            // 文件类型和权限
+            printf("%c", S_ISDIR(entries[i].st.st_mode) ? 'd' : 
+                   S_ISLNK(entries[i].st.st_mode) ? 'l' : '-');
+            printf("%c%c%c", entries[i].st.st_mode & S_IRUSR ? 'r' : '-',
+                             entries[i].st.st_mode & S_IWUSR ? 'w' : '-',
+                             entries[i].st.st_mode & S_IXUSR ? 'x' : '-');
+            printf("%c%c%c", entries[i].st.st_mode & S_IRGRP ? 'r' : '-',
+                             entries[i].st.st_mode & S_IWGRP ? 'w' : '-',
+                             entries[i].st.st_mode & S_IXGRP ? 'x' : '-');
+            printf("%c%c%c ", entries[i].st.st_mode & S_IROTH ? 'r' : '-',
+                              entries[i].st.st_mode & S_IWOTH ? 'w' : '-',
+                              entries[i].st.st_mode & S_IXOTH ? 'x' : '-');
 
-    for(int i=0;i<count;i++){
-        printf("%ld  %s\n",f[i].block,f[i].filename);
+            // 其他信息
+            struct passwd *pw = getpwuid(entries[i].st.st_uid);
+            struct group *gr = getgrgid(entries[i].st.st_gid);
+            printf("%3lu %-8s %-8s %8ld ",
+                   entries[i].st.st_nlink,
+                   pw ? pw->pw_name : "unknown",
+                   gr ? gr->gr_name : "unknown",
+                   entries[i].st.st_size);
+
+            // 时间格式化
+            char time_buf[80];
+            strftime(time_buf, sizeof(time_buf), "%b %d %H:%M", localtime(&entries[i].st.st_mtime));
+            printf("%s ", time_buf);
+
+            print_color_name(entries[i].name, entries[i].st.st_mode);
+            printf("\n");
+        }
+    } else { // 普通模式输出
+        struct winsize w;
+        ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+        display_normal(entries, count, w.ws_col, &widths);
+    }
+}
+
+void display_normal(FileEntry *entries, int count, int term_width, ColumnWidths *widths) {
+    int max_name_len = 0;
+    for (int i = 0; i < count; i++) {
+        int len = strlen(entries[i].name);
+        if (len > max_name_len) max_name_len = len;
     }
 
-    free(f);
-    closedir(dir);
-    
+    // 计算额外字段宽度
+    int extra_width = 0;
+    if (widths->max_inode > 0) extra_width += widths->max_inode + 1;
+    if (widths->max_blocks > 0) extra_width += widths->max_blocks + 1;
+
+    int col_width = max_name_len + extra_width + 2;
+    int cols = term_width / col_width;
+    if (cols == 0) cols = 1;
+    int rows = (count + cols - 1) / cols;
+
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            int idx = c * rows + r;
+            if (idx >= count) continue;
+            
+            // 打印inode和块大小
+            if (widths->max_inode > 0) 
+                printf("%*lu ", widths->max_inode, entries[idx].st.st_ino);
+            if (widths->max_blocks > 0) 
+                printf("%*ld ", widths->max_blocks, entries[idx].st.st_blocks/2);
+            
+            // 打印带颜色的文件名
+            print_color_name(entries[idx].name, entries[idx].st.st_mode);
+            
+            // 填充空格对齐
+            int spaces = col_width - strlen(entries[idx].name) - extra_width;
+            printf("%*s", spaces, "");
+        }
+        printf("\n");
+    }
+}
+
+void print_color_name(const char *name, mode_t mode) {
+    if (S_ISDIR(mode)) printf("\033[1;34m");
+    else if (S_ISLNK(mode)) printf("\033[1;36m");
+    else if (mode & S_IXUSR) printf("\033[1;32m");
+    else printf("\033[0m");
+    printf("%s\033[0m", name);
+}
+
+void handle_error(const char *path) {
+    fprintf(stderr, "ls: 无法访问 '%s': ", path);
+    perror("");
+    if (errno == EACCES) fprintf(stderr, "权限被拒绝\n");
 }
