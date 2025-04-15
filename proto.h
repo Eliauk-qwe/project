@@ -5,6 +5,8 @@
 
 #define REVPORT   "1989"  //1980+
 
+#define MTGOURP "224.2.2.2" // 约定的多播组ip
+
 #include <stdint.h>   //头文件！！
 struct msg_st{
     uint8_t name[NAMESIZE];
