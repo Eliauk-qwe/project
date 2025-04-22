@@ -1,92 +1,48 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <string.h>
-#include <arpa/inet.h>
+#include "us_xfr.h"
 
+#define BACKLOG 5
 
+int main(int argc, char *argv[])
+{
+    struct sockaddr_un addr;
+    int sfd, cfd;
+    ssize_t numRead;
+    char buf[BUF_SIZE];
 
-#include "proto.h"
+    sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sfd == -1)
+        errExit("socket");
 
+    /* Construct server socket address, bind socket to it,
+       and make this a listening socket */
+    if (remove(SV_SOCK_PATH) == -1 && errno != ENOENT)
+        errExit("remove-%s", SV_SOCK_PATH);
 
-int main(int argc,char** argv){
-    int cilent_fd,fp;
-    struct sockaddr_in  server_addr;
-    long long stamp;
-    char buffer[1024];
+    memset(&addr, 0, sizeof(struct sockaddr_un));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SV_SOCK_PATH, sizeof(addr.sun_path) - 1);
+if (bind(sfd, (struct sockaddr *) &addr, sizeof(struct sockaddr_un)) == -1)
+    errExit("bind");
 
-    if(argc<2){
-        fprintf(stderr,"usage...");
-        exit(1);
-    }
+if (listen(sfd, BACKLOG) == -1)
+    errExit("listen");
 
-    cilent_fd=socket(AF_INET,SOCK_STREAM,0);
-    if(cilent_fd<0){
-        perror("socket()");
-        exit(1);
+for (;;) {    /* Handle client connections iteratively */
+    /* Accept a connection. The connection is returned on a new
+       socket, 'cfd'; the listening socket ('sfd') remains open
+       and can be used to accept further connections. */
+    cfd = accept(sfd, NULL, NULL);
+    if (cfd == -1)
+        errExit("accept");
 
-    }
-    
-    memset(&server_addr,0,sizeof(server_addr));
-    server_addr.sin_family=AF_INET;
-    server_addr.sin_port=htons(atoi(SERVERPORT));
-    inet_pton(AF_INET,argv[1],&server_addr.sin_addr.s_addr);
+    /* Transfer data from connected socket to stdout until EOF */
+    while ((numRead = read(cfd, buf, BUF_SIZE)) > 0)
+        if (write(STDOUT_FILENO, buf, numRead) != numRead)
+            fatal("partial/failed write");
 
-    if(connect(cilent_fd,&server_addr,sizeof(server_addr))<0){
-        perror("connect");
-        exit(1);
-    }
-
-    /*fp=fdopen(cilent_fd,"r+");
-    if(fp == NULL) {
-        perror("dfopen()");
-        exit(1);
-    }
-
-    if(fscanf(fp,FMT_STAMP,&stamp)<1){
-         fprintf(stderr, "Bad format!\n");
-    }else {
-        fprintf(stdout, "stamp = %lld\n", stamp);
-    }
-
-
-    // 按照标准io的方式关闭fp
-    fclose(fp);
-    exit(0);*/
-
-
-    // 发送和接收消息
-   /* send(cilent_fd, "你好，服务器！", 18, 0);
-    recv(cilent_fd, buffer, sizeof(buffer) - 1, 0);
-    printf("收到服务器消息：%s\n", buffer);*/
-
-
-    // 发送消息到服务器
-    char *message = "你好，服务器！";
-    if (send(cilent_fd, message, strlen(message), 0) < 0) {  // 修正长度计算
-        perror("send");
-        close(cilent_fd);
-        exit(1);
-    }
-
-    // 接收服务器响应
-    int recv_len = recv(cilent_fd, buffer, sizeof(buffer) - 1, 0);
-    if (recv_len < 0) {
-        perror("recv");
-    } else if (recv_len == 0) {
-        printf("服务器关闭连接\n");
-    } else {
-        buffer[recv_len] = '\0';
-        printf("收到服务器响应: %s\n", buffer);
-    }
-
-    // 关闭连接
-    close(cilent_fd);
-    return 0;
-
-
-
-
-
+    if (numRead == -1)
+        errExit("read");
+    if (close(cfd) == -1)
+        errMsg("close");
+}
 }
