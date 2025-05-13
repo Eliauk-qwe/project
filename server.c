@@ -4,10 +4,14 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <dirent.h>
+#include <fcntl.h>
+
 
 
 #define PORT 2100
 #define LISTEN_NUM  5
+#define BUFFER_SIZE 1024
 
 
 //客户端结构体
@@ -148,22 +152,78 @@ void *control_thread_func(void *arg) {
 
 
 void *data_thread_func(void *arg) {
+    data_conn_t * data=(data_conn_t*)arg;
+    int data_job_socket=data->data_socket;
+
      if (strcmp(data->command, "LIST") == 0) {
-        send_file_list();
+        send_file_list(data_job_socket);
     } else if (strcmp(data->command, "STOR") == 0) {
-        receive_file(sock, data->filename);
+        receive_file(data_job_socket, data->filename);
     } else if (strcmp(data->command, "RETR") == 0) {
-        send_file(sock, data->filename);
+        send_file(data_job_socket, data->filename);
     }
+
+    close(data_job_socket);
+    free(data);
+    return NULL;
 }
 
 
-
+//LIST
 void send_file_list(int data_socket) {
+    DIR *dir;
+    struct  dirent *entry;
+    char buffer [BUFFER_SIZE];
+
+    dir =opendir(".");   // "."表示当前目录
+    if(dir == NULL){
+        perror("opendir");
+        return ;
+    }
+
+    while ((entry=readdir(dir)) != NULL)
+    {
+        snprintf(buffer,sizeof(buffer),"%s\r\n",entry->d_name);
+        send(data_socket,buffer,strlen(buffer),0);
+    }
+
+    closedir(dir);
+    
 }
 
 void receive_file(int data_socket, const char *filename) {
+    char buffer[BUFFER_SIZE];
+    int fd=open(filename,O_WRONLY | O_CREAT | O_TRUNC ,0644);
+    if (fd<0)
+    {
+        perror("open for write");
+        return ;
+    }
+    
+    ssize_t n;
+    while (n=recv(data_socket,buffer,BUFFER_SIZE,0))
+    {
+        write(fd,buffer,n);
+    }
+
+    close(fd);
+    
 }
 
 void send_file(int data_socket, const char *filename) {
+    char buffer[BUFFER_SIZE];
+    int fd=open(filename,O_RDONLY );
+    if (fd<0)
+    {
+        perror("open for read");
+        return ;
+    }
+    
+    ssize_t n;
+    while ((n=read(fd,buffer,BUFFER_SIZE))>0)
+    {
+        send(data_socket,buffer,n,0);
+    }
+
+    close(fd);
 }
