@@ -1,229 +1,203 @@
 #include <stdio.h>
-#include <sys/socket.h>
-#include <sys/types.h>
+#include <stdlib.h>
 #include <string.h>
-#include <netinet/in.h>
+#include <unistd.h>
 #include <pthread.h>
-#include <dirent.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <errno.h>
 
-
-
-#define PORT 2100
-#define LISTEN_NUM  5
+#define CONTROL_PORT 2100
 #define BUFFER_SIZE 1024
 
-
-//客户端结构体
-typedef struct{
+typedef struct {
     int control_socket;
-    struct sockaddr_in client_addr; 
-}client_ifm;
+    struct sockaddr_in client_addr;
+} client_info_t;
 
-// 数据连接结构
 typedef struct {
     int data_socket;
+    int control_socket; // 新增控制套接字字段
     char command[16];
     char filename[256];
 } data_conn_t;
 
+void send_file_list(int data_socket) {
+    DIR *dir;
+    struct dirent *entry;
+    char buffer[BUFFER_SIZE];
 
-void *control_thread_func(void *arg) ;
-
-void *data_thread_func(void *arg) ;
-
-void send_file_list(int data_socket) ;
-
-void receive_file(int data_socket, const char *filename) ;
-
-void send_file(int data_socket, const char *filename) ;
-
-int main(){
-    int server_socket;
-    struct sockaddr_in server_addr ;   //注意头文件
-
-    //创建套接字
-    server_socket=socket(AF_INET,SOCK_STREAM,0);
-    
-    //bind分配
-    memset(&server_addr,0,sizeof(server_addr));
-    server_addr.sin_addr.s_addr=htonl(INADDR_ANY);
-    server_addr.sin_family=AF_INET;
-    server_addr.sin_port=htons(PORT);
-
-    bind(server_socket,(struct sockaddr_in*)&server_addr,sizeof(server_addr));
-    
-    
-    //listen监听
-    listen(server_socket,LISTEN_NUM);
-    printf("服务端正在监听%d端口",PORT);
-
-    while(1){
-        struct sockaddr_in client_addr;
-
-        int client_socket=accept(server_socket,(struct sockaddr*)&client_addr,sizeof(client_addr));
-        
-        client_ifm *c_ifm = malloc(sizeof(client_ifm));
-        c_ifm->client_addr=client_addr;
-        c_ifm->control_socket=client_socket;
-
-        pthread_t tid;
-        pthread_create(&tid,NULL,control_thread_func,c_ifm);
-        pthread_detach(tid);
+    dir = opendir(".");
+    if (dir == NULL) {
+        perror("opendir");
+        return;
     }
 
-    close(server_socket);
-
-    return 0;
-}
-
-//服务端的控制线程
-void *control_thread_func(void *arg) {
-    char *command,cmd,arg1;
-
-
-    client_ifm *c_ifm =(client_ifm *)arg;
-    int control_thread_socket=c_ifm->control_socket;
-    free(c_ifm);
-
-    const char* server_ready = "Server is ready !\r\n";
-    send(control_thread_socket,server_ready,strlen(server_ready),0);
-    int data_port=0;
-    int pasv_socket;
-
-    while(1){
-        memset(&command,0,sizeof(command));
-        recv(control_thread_socket,command,sizeof(command),0);
-
-        //解析传过来的参数
-        sscanf(command,"%s %s",cmd,arg1);
-        printf("cmd:%s  arg1:%s",cmd,arg1);
-
-        //PASV ???
-        if(strcmp(cmd,"PASV")==0){
-            pasv_socket=socket(AF_INET,SOCK_STREAM,0);
-
-            struct sockaddr_in pasv_socket_addr;
-            memset(&pasv_socket_addr,0,sizeof(pasv_socket_addr));
-            pasv_socket_addr.sin_addr.s_addr=htonl(INADDR_ANY);
-            pasv_socket_addr.sin_family=AF_INET;
-            pasv_socket_addr.sin_port=0;
-            bind(pasv_socket,(struct sockaddr_in *)&pasv_socket_addr,sizeof(pasv_socket_addr));
-
-            listen(pasv_socket,1);
-            //获取实际端口
-            socklen_t pasv_socket_addr_len=sizeof(pasv_socket_addr);
-
-            getsockname(pasv_socket,(struct sockaddr_in *)&pasv_socket_addr,&pasv_socket_addr_len);
-
-            //传回信息
-            data_port=ntohs(pasv_socket_addr.sin_port);
-            int p1=data_port/256,p2=data_port%256;
-            const char* return_ip=ntohl(pasv_socket_addr.sin_addr.s_addr);
-            char *return_ifm;
-            sprintf(return_ifm,"227 Entering Passive Mode (%s,%d,%d)\r\n",return_ip,p1,p2);
-            send(pasv_socket,return_ifm,strlen(return_ifm),0);
-
-        } else if (strcmp(cmd, "LIST") == 0 || strcmp(cmd, "RETR") == 0 || strcmp(cmd, "STOR") == 0) {
-            struct sockaddr_in  client_data_addr;
-            socklen_t client_data_addr_len=sizeof(client_data_addr);
-            int client_data_socket=accept(pasv_socket,(struct sockaddr_in*)&client_data_addr,&client_data_addr_len);
-
-            data_conn_t *con=malloc(sizeof(data_conn_t));
-            strcpy(con->command,cmd);
-            strcpy(con->filename,arg1);
-            con->data_socket=client_data_socket;
-
-
-            pthread_t tid;
-            pthread_create(&tid, NULL, data_thread_func, con);
-            pthread_detach(tid);
-
-            close(pasv_socket);
-
-        }else{
-            send(control_thread_socket,"usage err\r\n",12,0);
-        }
+    while ((entry = readdir(dir)) != NULL) {
+        snprintf(buffer, sizeof(buffer), "%s\r\n", entry->d_name);
+        send(data_socket, buffer, strlen(buffer), 0);
     }
 
-    close(control_thread_socket);
-    return NULL;
+    closedir(dir);
 }
 
+void receive_file(int data_socket, const char *filename, int control_sock) {
+    char buffer[BUFFER_SIZE];
+    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        send(control_sock, "550 File operation failed\r\n", 25, 0);
+        perror("open for write");
+        return;
+    }
+
+    ssize_t n;
+    while ((n = recv(data_socket, buffer, BUFFER_SIZE, 0)) > 0) {
+        write(fd, buffer, n);
+    }
+    close(fd);
+}
+
+void send_file(int data_socket, const char *filename, int control_sock) {
+    char buffer[BUFFER_SIZE];
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        send(control_sock, "550 File not found\r\n", 20, 0);
+        perror("open for read");
+        return;
+    }
+
+    ssize_t n;
+    while ((n = read(fd, buffer, BUFFER_SIZE)) > 0) {
+        send(data_socket, buffer, n, 0);
+    }
+    close(fd);
+}
 
 void *data_thread_func(void *arg) {
-    data_conn_t * data=(data_conn_t*)arg;
-    int data_job_socket=data->data_socket;
+    data_conn_t *data = (data_conn_t *)arg;
+    int sock = data->data_socket;
 
-     if (strcmp(data->command, "LIST") == 0) {
-        send_file_list(data_job_socket);
+    if (strcmp(data->command, "LIST") == 0) {
+        send_file_list(sock);
     } else if (strcmp(data->command, "STOR") == 0) {
-        receive_file(data_job_socket, data->filename);
+        receive_file(sock, data->filename, data->control_socket);
     } else if (strcmp(data->command, "RETR") == 0) {
-        send_file(data_job_socket, data->filename);
+        send_file(sock, data->filename, data->control_socket);
     }
 
-    close(data_job_socket);
+    close(sock);
     free(data);
     return NULL;
 }
 
+void *control_thread_func(void *arg) {
+    client_info_t *client = (client_info_t *)arg;
+    int control_sock = client->control_socket;
+    free(client);
 
-//LIST
-void send_file_list(int data_socket) {
-    DIR *dir;
-    struct  dirent *entry;
-    char buffer [BUFFER_SIZE];
+    send(control_sock, "220 FTP Server Ready\r\n", 23, 0);
 
-    dir =opendir(".");   // "."表示当前目录
-    if(dir == NULL){
-        perror("opendir");
-        return ;
+    int pasv_socket = -1;
+    char command[BUFFER_SIZE], cmd[16], arg1[256];
+
+    while (1) {
+        memset(command, 0, sizeof(command));
+        if (recv(control_sock, command, sizeof(command), 0) <= 0) break;
+
+        sscanf(command, "%15s %255s", cmd, arg1);
+        printf("CMD: %s ARG: %s\n", cmd, arg1);
+
+        if (strcmp(cmd, "PASV") == 0) {
+            pasv_socket = socket(AF_INET, SOCK_STREAM, 0);
+            struct sockaddr_in pasv_addr;
+            socklen_t len = sizeof(pasv_addr);
+            
+            memset(&pasv_addr, 0, sizeof(pasv_addr));
+            pasv_addr.sin_family = AF_INET;
+            pasv_addr.sin_addr.s_addr = INADDR_ANY;
+            pasv_addr.sin_port = 0;
+            bind(pasv_socket, (struct sockaddr*)&pasv_addr, sizeof(pasv_addr));
+            listen(pasv_socket, 1);
+            
+            getsockname(pasv_socket, (struct sockaddr*)&pasv_addr, &len);
+            int data_port = ntohs(pasv_addr.sin_port);
+            int p1 = data_port / 256, p2 = data_port % 256;
+
+            // 动态获取本地IP
+            struct sockaddr_in local_addr;
+            socklen_t local_len = sizeof(local_addr);
+            getsockname(control_sock, (struct sockaddr*)&local_addr, &local_len);
+            char *ip_str = inet_ntoa(local_addr.sin_addr);
+            int h1, h2, h3, h4;
+            sscanf(ip_str, "%d.%d.%d.%d", &h1, &h2, &h3, &h4);
+
+            char response[128];
+            sprintf(response, "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)\r\n", h1, h2, h3, h4, p1, p2);
+            send(control_sock, response, strlen(response), 0);
+
+        } else if (strcmp(cmd, "LIST") == 0 || strcmp(cmd, "RETR") == 0 || strcmp(cmd, "STOR") == 0) {
+            if (pasv_socket == -1) {
+                send(control_sock, "425 No data connection\r\n", 23, 0);
+                continue;
+            }
+
+            struct sockaddr_in client_data_addr;
+            socklen_t client_len = sizeof(client_data_addr);
+            int data_sock = accept(pasv_socket, (struct sockaddr*)&client_data_addr, &client_len);
+
+            data_conn_t *conn = malloc(sizeof(data_conn_t));
+            conn->data_socket = data_sock;
+            conn->control_socket = control_sock;
+            strncpy(conn->command, cmd, sizeof(conn->command));
+            strncpy(conn->filename, arg1, sizeof(conn->filename));
+
+            pthread_t tid;
+            pthread_create(&tid, NULL, data_thread_func, conn);
+            pthread_detach(tid);
+
+            close(pasv_socket);
+            pasv_socket = -1;
+        } else if (strcmp(cmd, "QUIT") == 0) {
+            send(control_sock, "221 Goodbye\r\n", 13, 0);
+            break;
+        } else {
+            send(control_sock, "500 Unknown command\r\n", 24, 0);
+        }
     }
 
-    while ((entry=readdir(dir)) != NULL)
-    {
-        snprintf(buffer,sizeof(buffer),"%s\r\n",entry->d_name);
-        send(data_socket,buffer,strlen(buffer),0);
-    }
-
-    closedir(dir);
-    
+    close(control_sock);
+    return NULL;
 }
 
-void receive_file(int data_socket, const char *filename) {
-    char buffer[BUFFER_SIZE];
-    int fd=open(filename,O_WRONLY | O_CREAT | O_TRUNC ,0644);
-    if (fd<0)
-    {
-        perror("open for write");
-        return ;
-    }
-    
-    ssize_t n;
-    while (n=recv(data_socket,buffer,BUFFER_SIZE,0))
-    {
-        write(fd,buffer,n);
+int main() {
+    int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in server_addr = {0};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(CONTROL_PORT);
+
+    bind(listen_sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    listen(listen_sock, 5);
+
+    printf("FTP Server listening on port %d...\n", CONTROL_PORT);
+
+    while (1) {
+        struct sockaddr_in client_addr;
+        socklen_t addrlen = sizeof(client_addr);
+        int client_sock = accept(listen_sock, (struct sockaddr*)&client_addr, &addrlen);
+
+        client_info_t *info = malloc(sizeof(client_info_t));
+        info->control_socket = client_sock;
+        info->client_addr = client_addr;
+
+        pthread_t tid;
+        pthread_create(&tid, NULL, control_thread_func, info);
+        pthread_detach(tid);
     }
 
-    close(fd);
-    
-}
-
-void send_file(int data_socket, const char *filename) {
-    char buffer[BUFFER_SIZE];
-    int fd=open(filename,O_RDONLY );
-    if (fd<0)
-    {
-        perror("open for read");
-        return ;
-    }
-    
-    ssize_t n;
-    while ((n=read(fd,buffer,BUFFER_SIZE))>0)
-    {
-        send(data_socket,buffer,n,0);
-    }
-
-    close(fd);
+    close(listen_sock);
+    return 0;
 }
