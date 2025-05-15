@@ -1,203 +1,299 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <arpa/inet.h>
+#include <time.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <errno.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdarg.h>
 
-#define CONTROL_PORT 2100
-#define BUFFER_SIZE 1024
+threadpool_t *pool=NULL;
 
+#define CONTROL_PORT  2100
+#define LISTEN_NUM    10
+#define PTHREADPOOL_SIZE 10
+#define QUEUE_SIZE      64
+#define BUFSIZE       1024
+#define MAX_CMD_LEN 512
+#define MAX_USERNAME_LEN 32
+#define MAX_PASS_LEN 32
+
+
+//线程池结构体
 typedef struct {
-    int control_socket;
+    pthread_mutex_t lock;          // 互斥锁
+    pthread_cond_t cond;         // 条件变量（任务通知）
+    pthread_t *threads;            // 线程数组指针
+    int thread_count;              // 线程数量
+    int queue_size;                // 任务队列容量
+    int head, tail, count;         // 队列头尾指针及元素计数
+    int shutdown;                  // 关闭标志
+    void (*task_func)(void *);     // 任务处理函数指针
+    void **task_args;              // 任务参数队列
+} threadpool_t;
+
+//任务参数结构
+typedef struct{
+    int control_fd;
     struct sockaddr_in client_addr;
-} client_info_t;
+}client_task_t;
 
+// 简易用户验证 (用户名密码明文，实际使用需安全措施)
 typedef struct {
-    int data_socket;
-    int control_socket; // 新增控制套接字字段
-    char command[16];
-    char filename[256];
-} data_conn_t;
+    char username[MAX_USERNAME_LEN];
+    char password[MAX_PASS_LEN];
+} User;
 
-void send_file_list(int data_socket) {
-    DIR *dir;
-    struct dirent *entry;
-    char buffer[BUFFER_SIZE];
+User users[] = {
+    {"test", "123456"},
+    {"user", "pass"},
+    {0}
+};
 
-    dir = opendir(".");
-    if (dir == NULL) {
-        perror("opendir");
-        return;
+
+
+
+
+
+
+//创建监听套接字函数
+static int creat_listen_socket(int port);
+//创建线程池
+threadpool_t* creat_pthreadpool(int pth_num,int queue_num,void (*task_func) (void*));
+//线程池中的线程
+static void* pthreadpool_pthread(void* threadpool);
+//服务端控制线程
+void control_func(void *arg);
+// 向客户端发消息，带格式化
+static void ftp_send(int fd,const char* fmt,...);
+//接受客户端的消息
+static int ftp_recv(int fd,char *buf,int maxlen);
+//比较用户名和密码
+int diff_user_pass(const char *user,const char *pass);
+
+int main(){
+
+    //用于生成随机端口
+    srand(time(NULL));
+
+    int server_fd=creat_listen_socket(CONTROL_PORT);
+    if(server_fd<0){
+        fprintf(stderr,"creat_listen_socket() failed!\n");
+        close(server_fd);
+        return -1;
     }
 
-    while ((entry = readdir(dir)) != NULL) {
-        snprintf(buffer, sizeof(buffer), "%s\r\n", entry->d_name);
-        send(data_socket, buffer, strlen(buffer), 0);
-    }
+    pool=creat_pthreadpool(PTHREADPOOL_SIZE,QUEUE_SIZE,control_func);
 
-    closedir(dir);
+
+
+
+
+
 }
 
-void receive_file(int data_socket, const char *filename, int control_sock) {
-    char buffer[BUFFER_SIZE];
-    int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        send(control_sock, "550 File operation failed\r\n", 25, 0);
-        perror("open for write");
-        return;
+
+static int creat_listen_socket(int port){
+    int fd;
+    fd=socket(AF_INET,SOCK_STREAM,0);
+    if(fd<0){
+        perror("socket()");
+        return 1;
     }
 
-    ssize_t n;
-    while ((n = recv(data_socket, buffer, BUFFER_SIZE, 0)) > 0) {
-        write(fd, buffer, n);
+
+    //允许地址重用
+    int opt=1;
+    setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
+
+    struct  sockaddr_in addr;
+
+    memset(&addr,0,sizeof(addr));
+    //无论主机字节序（小端或大端）如何，0 的二进制表示始终是全零，因此：不用htonl
+    addr.sin_addr.s_addr=INADDR_ANY;
+    addr.sin_family=AF_INET;
+    addr.sin_port=htons(port);
+
+    socklen_t len =sizeof(addr);
+    if(bind(fd,(struct sockaddr_in*)&addr,len) <0){
+        perror("bind()");
+        close(fd);
+        return -1;
     }
-    close(fd);
+
+    if(listen(fd,LISTEN_NUM) <0){
+        perror("listen()");
+        close(fd);
+        return -1;
+    }
+
+    return fd;
 }
 
-void send_file(int data_socket, const char *filename, int control_sock) {
-    char buffer[BUFFER_SIZE];
-    int fd = open(filename, O_RDONLY);
-    if (fd < 0) {
-        send(control_sock, "550 File not found\r\n", 20, 0);
-        perror("open for read");
-        return;
+threadpool_t* creat_pthreadpool(int pth_num,int queue_num,void (*task_func) (void*)){
+    threadpool_t *pool =malloc(sizeof(threadpool_t));
+    if(!pool){
+
     }
 
-    ssize_t n;
-    while ((n = read(fd, buffer, BUFFER_SIZE)) > 0) {
-        send(data_socket, buffer, n, 0);
+    pool->thread_count=pth_num;
+    pool->queue_size=queue_num;
+    pool->task_func=task_func;
+    pool->head=pool->tail=pool->count=0;
+    pool->shutdown=0;
+
+    pthread_mutex_init(&pool->lock,NULL);
+    pthread_cond_init(&pool->cond,NULL);
+
+    pool->threads=malloc(sizeof(pthread_t)* pth_num);
+    pool->task_args=malloc(sizeof(void*)*queue_num);
+
+    for(int i=0 ;i< pth_num ;i++){
+        pthread_create(&pool->threads[i],NULL,pthreadpool_pthread,pool);
     }
-    close(fd);
+
+    return pool;
+
+       
 }
 
-void *data_thread_func(void *arg) {
-    data_conn_t *data = (data_conn_t *)arg;
-    int sock = data->data_socket;
+static void* pthreadpool_pthread(void* threadpool){
+    threadpool_t *pool =(threadpool_t*)threadpool;
+    while(1){
+        pthread_mutex_lock(&pool->lock);
+        // 当任务队列为空且线程池未关闭时，线程进入等待状态
+        while (pool->count==0 && !pool->shutdown)
+        {
+            pthread_cond_wait(&pool->cond,&pool->lock);
+        }
+        // 如果线程池已关闭，解锁并退出线程
+        if(pool->shutdown){
+            pthread_mutex_unlock(&pool->lock);
+            pthread_exit(NULL);
+        }
+        // 从任务队列中取出一个任务
+        void *task =pool->task_args[pool->head];
+        pool->head=(pool->head+1)%pool->queue_size;
+        pool->count--;
 
-    if (strcmp(data->command, "LIST") == 0) {
-        send_file_list(sock);
-    } else if (strcmp(data->command, "STOR") == 0) {
-        receive_file(sock, data->filename, data->control_socket);
-    } else if (strcmp(data->command, "RETR") == 0) {
-        send_file(sock, data->filename, data->control_socket);
+        pthread_mutex_unlock(&pool->lock);
+        // 执行任务
+        pool->task_func(task);
+
     }
 
-    close(sock);
-    free(data);
     return NULL;
 }
 
-void *control_thread_func(void *arg) {
-    client_info_t *client = (client_info_t *)arg;
-    int control_sock = client->control_socket;
-    free(client);
 
-    send(control_sock, "220 FTP Server Ready\r\n", 23, 0);
+void control_func(void *arg){
+    client_task_t *task =(client_task_t*)arg;
+    int ctrl_fd = task->control_fd;
+    free(task);
 
-    int pasv_socket = -1;
-    char command[BUFFER_SIZE], cmd[16], arg1[256];
+    ftp_send(ctrl_fd,"Welcome to my FTP Server");
 
-    while (1) {
-        memset(command, 0, sizeof(command));
-        if (recv(control_sock, command, sizeof(command), 0) <= 0) break;
+    char buf[MAX_CMD_LEN];
+    char user[MAX_USERNAME_LEN] = {0};
+    char pass[MAX_PASS_LEN] = {0};
+    int flag=0;
+    
 
-        sscanf(command, "%15s %255s", cmd, arg1);
-        printf("CMD: %s ARG: %s\n", cmd, arg1);
 
-        if (strcmp(cmd, "PASV") == 0) {
-            pasv_socket = socket(AF_INET, SOCK_STREAM, 0);
-            struct sockaddr_in pasv_addr;
-            socklen_t len = sizeof(pasv_addr);
+    while(1){
+        int recv=ftp_recv(ctrl_fd,buf,BUFSIZE);
+        if(recv<0)  break;
+
+        printf("CMD:%s",buf);
+
+        if(strncmp(buf,"USER",4)==0){
+            sscanf(buf+5,"%s",user);
+            ftp_send(ctrl_fd, "331 Username OK, need password");
             
-            memset(&pasv_addr, 0, sizeof(pasv_addr));
-            pasv_addr.sin_family = AF_INET;
-            pasv_addr.sin_addr.s_addr = INADDR_ANY;
-            pasv_addr.sin_port = 0;
-            bind(pasv_socket, (struct sockaddr*)&pasv_addr, sizeof(pasv_addr));
-            listen(pasv_socket, 1);
-            
-            getsockname(pasv_socket, (struct sockaddr*)&pasv_addr, &len);
-            int data_port = ntohs(pasv_addr.sin_port);
-            int p1 = data_port / 256, p2 = data_port % 256;
-
-            // 动态获取本地IP
-            struct sockaddr_in local_addr;
-            socklen_t local_len = sizeof(local_addr);
-            getsockname(control_sock, (struct sockaddr*)&local_addr, &local_len);
-            char *ip_str = inet_ntoa(local_addr.sin_addr);
-            int h1, h2, h3, h4;
-            sscanf(ip_str, "%d.%d.%d.%d", &h1, &h2, &h3, &h4);
-
-            char response[128];
-            sprintf(response, "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)\r\n", h1, h2, h3, h4, p1, p2);
-            send(control_sock, response, strlen(response), 0);
-
-        } else if (strcmp(cmd, "LIST") == 0 || strcmp(cmd, "RETR") == 0 || strcmp(cmd, "STOR") == 0) {
-            if (pasv_socket == -1) {
-                send(control_sock, "425 No data connection\r\n", 23, 0);
-                continue;
+        }else if(strncmp(buf,"PASS",4)==0){
+            sscanf(buf+5,"%s",pass);
+            if(diff_user_pass(user,pass)){
+                flag=1;
+                ftp_send(ctrl_fd, "230 Login successful");
+            }else{
+                ftp_send(ctrl_fd, "530 Login incorrect");
+                break;
             }
 
-            struct sockaddr_in client_data_addr;
-            socklen_t client_len = sizeof(client_data_addr);
-            int data_sock = accept(pasv_socket, (struct sockaddr*)&client_data_addr, &client_len);
+        }else if(!flag){
+            ftp_send(ctrl_fd, "530 Please login with USER and PASS");
+        }
 
-            data_conn_t *conn = malloc(sizeof(data_conn_t));
-            conn->data_socket = data_sock;
-            conn->control_socket = control_sock;
-            strncpy(conn->command, cmd, sizeof(conn->command));
-            strncpy(conn->filename, arg1, sizeof(conn->filename));
 
-            pthread_t tid;
-            pthread_create(&tid, NULL, data_thread_func, conn);
-            pthread_detach(tid);
 
-            close(pasv_socket);
-            pasv_socket = -1;
-        } else if (strcmp(cmd, "QUIT") == 0) {
-            send(control_sock, "221 Goodbye\r\n", 13, 0);
-            break;
-        } else {
-            send(control_sock, "500 Unknown command\r\n", 24, 0);
+
+
+
+    }
+
+    
+}
+
+
+static void ftp_send(int fd, const char *fmt,...){
+    char buf[BUFSIZE];
+
+    va_list arg;
+
+    va_start(arg,fmt);
+
+    vsnprintf(buf,sizeof(buf),fmt,arg);
+
+    va_end(arg);
+
+    strcat(buf,"\r\n");
+
+    send(fd,buf,sizeof(buf),0);
+    
+}
+
+static int ftp_recv(int fd,char *buf,int maxlen){
+    //已读取到字符数量
+    int i=0;
+    //读取到的字符
+    int c='\0';
+    int n;
+
+    while(i< maxlen-1 && c != '\n'){
+        n=recv(fd,&c,1,0);
+        if(n>0){
+            if(c=='\r') continue;
+            buf[i++]=c;
+        }else{
+            return n;
         }
     }
 
-    close(control_sock);
-    return NULL;
+    buf[i]=='\0';
+    return n;
 }
 
-int main() {
-    int listen_sock = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in server_addr = {0};
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(CONTROL_PORT);
-
-    bind(listen_sock, (struct sockaddr*)&server_addr, sizeof(server_addr));
-    listen(listen_sock, 5);
-
-    printf("FTP Server listening on port %d...\n", CONTROL_PORT);
-
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t addrlen = sizeof(client_addr);
-        int client_sock = accept(listen_sock, (struct sockaddr*)&client_addr, &addrlen);
-
-        client_info_t *info = malloc(sizeof(client_info_t));
-        info->control_socket = client_sock;
-        info->client_addr = client_addr;
-
-        pthread_t tid;
-        pthread_create(&tid, NULL, control_thread_func, info);
-        pthread_detach(tid);
+int diff_user_pass(const char *user,const char *pass){
+    for(int i=0;users[i].username[0];i++){
+        if(strcmp(users[i].password,pass)==0  &&  strcmp(users[i].username,user)==0){
+            return 1;
+        }
     }
-
-    close(listen_sock);
     return 0;
+
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
