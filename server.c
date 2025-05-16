@@ -7,6 +7,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 threadpool_t *pool=NULL;
 
@@ -18,6 +20,16 @@ threadpool_t *pool=NULL;
 #define MAX_CMD_LEN 512
 #define MAX_USERNAME_LEN 32
 #define MAX_PASS_LEN 32
+#define MAX_PATH 512
+
+
+// ANSI颜色代码
+#define COLOR_RESET "\033[0m"
+#define COLOR_DIR "\033[1;34m"   // 蓝色目录
+#define COLOR_EXE "\033[1;32m"   // 绿色可执行文件
+#define COLOR_LINK "\033[1;36m"  // 青色符号链接
+#define COLOR_IMG "\033[1;33m"   // 黄色图片文件
+
 
 
 //线程池结构体
@@ -38,6 +50,24 @@ typedef struct{
     int control_fd;
     struct sockaddr_in client_addr;
 }client_task_t;
+
+
+// 处理 PASV 命令，启动数据监听线程，返回端口和监听 fd
+typedef struct {
+    int data_listen_fd;   // 数据监听套接字描述符
+    int data_port;        // 对外暴露的监听端口号
+    //pthread_t data_thread; // 处理数据连接的线程ID
+    int data_fd;          // 实际数据传输的连接套接字
+    int ctrl_fd;          // 控制连接的套接字描述符（用于发送响应）
+    char cmd[MAX_CMD_LEN];
+} data_transfer_t;
+
+// 数据传输线程参数
+typedef struct {
+    int data_fd;
+    int ctrl_fd;
+    char cmd[MAX_CMD_LEN];
+} data_thread_arg_t;
 
 // 简易用户验证 (用户名密码明文，实际使用需安全措施)
 typedef struct {
@@ -71,6 +101,16 @@ static void ftp_send(int fd,const char* fmt,...);
 static int ftp_recv(int fd,char *buf,int maxlen);
 //比较用户名和密码
 int diff_user_pass(const char *user,const char *pass);
+void *pasv_thread_func(void *arg) ;
+void *data_thread_func(void *arg) ;
+void ftp_list(int data_fd, const char *path) ;
+
+
+
+
+
+
+
 
 int main(){
 
@@ -192,12 +232,24 @@ void control_func(void *arg){
     int ctrl_fd = task->control_fd;
     free(task);
 
-    ftp_send(ctrl_fd,"Welcome to my FTP Server");
+    ftp_send(ctrl_fd,"Welcome to my FTP ");
+
+
+
+
+
 
     char buf[MAX_CMD_LEN];
+    //必须初始化为 {0}，以确保敏感数据的安全性和确定性。
     char user[MAX_USERNAME_LEN] = {0};
     char pass[MAX_PASS_LEN] = {0};
     int flag=0;
+    //初始值0表示尚未分配端口
+    int pasv_port=0;
+    //套接字尚未创建
+    int pasv_socket=-1;
+    data_transfer_t *data_t =NULL;
+    pthread_t data_tid;
     
 
 
@@ -205,8 +257,11 @@ void control_func(void *arg){
         int recv=ftp_recv(ctrl_fd,buf,BUFSIZE);
         if(recv<0)  break;
 
+        //接受命令
         printf("CMD:%s",buf);
 
+
+        //密码验证部分
         if(strncmp(buf,"USER",4)==0){
             sscanf(buf+5,"%s",user);
             ftp_send(ctrl_fd, "331 Username OK, need password");
@@ -224,6 +279,48 @@ void control_func(void *arg){
         }else if(!flag){
             ftp_send(ctrl_fd, "530 Please login with USER and PASS");
         }
+
+
+        // 进入被动模式，创建监听端口
+        else if(strncmp(buf,"PASV",4)==0){
+            //随机生成一个端口
+            //实际应用中，40000-50000常被用作非标准服务的默认端口范围
+            pasv_port=rand()%10000+40000;
+            pasv_socket=creat_listen_socket(pasv_port);
+            if(pasv_socket<0){
+                ftp_send(ctrl_fd,"425 Can't open data connection");
+                continue;
+            }
+
+            //RFC 959规定PASV响应应返回与控制连接相同的服务器IP地址
+            //即使数据连接使用不同端口，IP地址应与控制连接保持一致
+
+
+            //获取服务器ip
+            struct sockaddr_in addr;
+            socklen_t len=sizeof(addr);
+            getsockname(ctrl_fd,(struct sockaddr*)&addr,&len);
+            unsigned char *ip=(unsigned char*)addr.sin_addr.s_addr;
+
+            //将生成的端口号告知客户端控制线程，返回 227 entering passive mode (h1,h2,h3,h4,p1,p2)，其中端口号为 p1*256+p2，IP 地址为 h1.h2.h3.h4。
+            ftp_send(ctrl_fd,"227 entering passive mode (%u,%u,%u,%u,%u,%u)",ip[0],ip[1],ip[2],ip[3],(pasv_port >> 8) & 0xFF, pasv_port & 0xFF);
+            
+               
+            // 等待客户端连接数据端口，启动线程接收数据连接
+            data_t = malloc(sizeof(data_transfer_t));
+            data_t->ctrl_fd=ctrl_fd;
+            data_t->data_listen_fd=pasv_port;
+            data_t->data_port=pasv_port;
+            //初始化
+            data_t->data_fd=-1;
+
+            pthread_creat(&data_tid,NULL,pasv_thread_func,data_t);
+
+
+
+
+        }
+        
 
 
 
@@ -284,9 +381,120 @@ int diff_user_pass(const char *user,const char *pass){
 
 }
 
+void *pasv_thread_func(void *arg) {
+    data_transfer_t *data_t =(data_transfer_t *)arg;
+    struct sockaddr_in client_addr;
+    socklen_t len=sizeof(client_addr);
+
+    data_t -> data_fd = accept(data_t->data_listen_fd,(struct sockaddr*)&client_addr,&len);
+    if(data_t->data_fd <0){
+        perror("accept data");
+        close(data_t->data_listen_fd);
+        free(data_t);
+        return NULL;
+    }
+    close(data_t->data_listen_fd);
+
+    data_thread_arg_t *data_thread_t =malloc(sizeof(data_thread_arg_t));
+    //data_thread_t->cmd=data_t->cmd;
+    strcmp(data_thread_t->cmd,data_t->cmd);
+    data_thread_t->ctrl_fd=data_t->ctrl_fd;
+    data_thread_t->data_fd=data_t->data_fd;
 
 
+    pthread_t tid;
+    if(pthread_creat(&tid,NULL,data_thread_func,data_thread_t)==0){
+        pthread_detach(tid);
+    }else{
+        perror("pthread_create data");
+        close(data_t->data_fd);
+        free(data_thread_t);
+    }
 
+    free(data_t);
+    return NULL;
+
+
+}
+
+void *data_thread_func(void *arg) {
+    data_thread_arg_t *data_thread_t =(data_thread_arg_t*) arg;
+    int data_fd=data_thread_t->data_fd;
+    int ctrl_fd=data_thread_t->ctrl_fd;
+    char *cmd =data_thread_t->cmd;
+
+    if(strncmp(cmd,"LIST",4)==0){
+        char path[MAX_PATH] = {0};
+        if(strlen(cmd) > 5) sscanf(cmd+5, "%s", path);
+        ftp_list(data_fd, path);
+    }if(strncmp(cmd,"RERT",4)==0){
+        char filename[MAX_PATH]={0};
+        sscanf(cmd+5,"%s",filename);
+        ftp_rert();
+    }if(strncmp(cmd,"STOR",4)==0){
+        char filename[MAX_PATH]={0};
+        sscanf(cmd+5,"%s",filename);
+        ftp_stor();
+    }
+
+    close(data_thread_t->data_fd);
+    ftp_send(ctrl_fd, "226 Transfer complete");
+    free(data_thread_t);
+    return NULL;
+
+
+}
+
+void ftp_list(int data_fd,const char *path){
+    DIR *dir;
+    struct dirent *entry;
+    struct stat file_stat;
+    char full_path[MAX_PATH];
+    char buf[BUFSIZE];
+    char actual_path[BUFSIZ]={0};
+
+    if(path==NULL || strlen(path)==0){
+        strcmp(actual_path,".");
+    }else{
+        strncmp(actual_path,path,MAX_PATH-1);//????/??
+    }
+
+
+    DIR *dir=opendir(actual_path);
+    if(!dir){
+        snprintf(buf, sizeof(buf), "Failed to open directory: %s\r\n", actual_path);
+        send(data_fd, buf, strlen(buf), 0);
+        return;
+    }
+
+
+    while((entry = readdir(dir))!=NULL){
+        snprintf(full_path,sizeof(full_path),"%s/%s",entry->d_name);
+        if(lstat(full_path,&file_stat) ==-1)  continue;
+
+        const char *color=COLOR_RESET;
+
+        if(S_ISDIR(file_stat.st_mode))   color=COLOR_DIR;
+        else if(S_ISLNK(file_stat.st_mode))  color=COLOR_LINK;
+        else if(file_stat.st_mode & S_IXUSR)  color=COLOR_EXE;
+        else{
+            const char *ext = strrchr(entry->d_name,'.');
+            if (ext && (
+                strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
+                strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".bmp") == 0 ||
+                strcasecmp(ext, ".gif") == 0
+            )) {
+                color = COLOR_IMG;
+            }
+        }
+
+        snprintf(buf,sizeof(buf),"%s%s%s\r\n",color,entry->d_name,COLOR_RESET);
+        send(data_fd,buf,strlen(buf),0);
+    }
+
+
+    closedir(dir);
+}
 
 
 
