@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-threadpool_t *pool=NULL;
 
 #define CONTROL_PORT  2100
 #define LISTEN_NUM    10
@@ -44,6 +43,9 @@ typedef struct {
     void (*task_func)(void *);     // 任务处理函数指针
     void **task_args;              // 任务参数队列
 } threadpool_t;
+
+threadpool_t *pool=NULL;
+
 
 //任务参数结构
 typedef struct{
@@ -104,6 +106,10 @@ int diff_user_pass(const char *user,const char *pass);
 void *pasv_thread_func(void *arg) ;
 void *data_thread_func(void *arg) ;
 void ftp_list(int data_fd, const char *path) ;
+void ftp_stor(int ctrl_fd,int data_fd,const char *filename);
+void ftp_retr(int ctrl_fd,int data_fd,const char *filename);
+int threadpool_add(threadpool_t *pool,void *arg);
+
 
 
 
@@ -125,9 +131,41 @@ int main(){
     }
 
     pool=creat_pthreadpool(PTHREADPOOL_SIZE,QUEUE_SIZE,control_func);
+    if(!pool){
+        fprintf(stderr,"creat_pthreadpool() failed");
+        close(server_fd);
+        return -1;
+    }
+
+    printf("FTP Server is listening %d\n",CONTROL_PORT);
+
+    while(1){
+        struct sockaddr_in client_addr;
+        socklen_t len=sizeof(client_addr);
+        int client_con_fd=accept(server_fd,(struct sockaddr*)&client_addr,&len);
+        if(client_con_fd<0){
+            perror("accept()");
+            continue;
+        }
+
+        client_task_t *task=malloc(sizeof(client_task_t));
+        task->client_addr=client_addr;
+        task->control_fd=client_con_fd;
+
+        if(threadpool_add(pool,task)!=0){
+            fprintf(stderr,"Server is busying,reject client");
+            close(client_con_fd);
+            free(task);
+
+        }
+
+        
+
+    }
 
 
-
+    close(server_fd);
+    return 0;
 
 
 
@@ -156,7 +194,7 @@ static int creat_listen_socket(int port){
     addr.sin_port=htons(port);
 
     socklen_t len =sizeof(addr);
-    if(bind(fd,(struct sockaddr_in*)&addr,len) <0){
+    if(bind(fd,(struct sockaddr*)&addr,len) <0){
         perror("bind()");
         close(fd);
         return -1;
@@ -190,6 +228,8 @@ threadpool_t* creat_pthreadpool(int pth_num,int queue_num,void (*task_func) (voi
     pool->task_args=malloc(sizeof(void*)*queue_num);
 
     for(int i=0 ;i< pth_num ;i++){
+        //---------------------------------------------------------------
+        //---------------------------------------------------------------
         pthread_create(&pool->threads[i],NULL,pthreadpool_pthread,pool);
     }
 
@@ -232,7 +272,7 @@ void control_func(void *arg){
     int ctrl_fd = task->control_fd;
     free(task);
 
-    ftp_send(ctrl_fd,"Welcome to my FTP ");
+    ftp_send(ctrl_fd,"220 Welcome to my FTP ");
 
 
 
@@ -300,7 +340,7 @@ void control_func(void *arg){
             struct sockaddr_in addr;
             socklen_t len=sizeof(addr);
             getsockname(ctrl_fd,(struct sockaddr*)&addr,&len);
-            unsigned char *ip=(unsigned char*)addr.sin_addr.s_addr;
+            unsigned char *ip=(unsigned char*)&addr.sin_addr.s_addr;
 
             //将生成的端口号告知客户端控制线程，返回 227 entering passive mode (h1,h2,h3,h4,p1,p2)，其中端口号为 p1*256+p2，IP 地址为 h1.h2.h3.h4。
             ftp_send(ctrl_fd,"227 entering passive mode (%u,%u,%u,%u,%u,%u)",ip[0],ip[1],ip[2],ip[3],(pasv_port >> 8) & 0xFF, pasv_port & 0xFF);
@@ -309,27 +349,33 @@ void control_func(void *arg){
             // 等待客户端连接数据端口，启动线程接收数据连接
             data_t = malloc(sizeof(data_transfer_t));
             data_t->ctrl_fd=ctrl_fd;
-            data_t->data_listen_fd=pasv_port;
+            data_t->data_listen_fd=pasv_socket;
             data_t->data_port=pasv_port;
             //初始化
             data_t->data_fd=-1;
 
-            pthread_creat(&data_tid,NULL,pasv_thread_func,data_t);
+            pthread_create(&data_tid,NULL,pasv_thread_func,data_t);
+            pthread_detach(data_tid);
 
 
 
 
+        }else if(strncmp(buf,"QUIT",4)==0){
+            ftp_send(ctrl_fd, "221 Goodbye");
         }
-        
 
-
-
-
-
-
+        else if (strncmp(buf, "LIST", 4) == 0 ||
+         strncmp(buf, "RETR", 4) == 0 ||
+         strncmp(buf, "STOR", 4) == 0) {
+            if (data_t) {
+                strcpy(data_t->cmd, buf); // <== 添加此句
+                ftp_send(ctrl_fd, "150 Opening data connection."); 
+            } else {
+                ftp_send(ctrl_fd, "425 Use PASV first.");
+                continue;
+            }
+        }
     }
-
-    
 }
 
 
@@ -346,7 +392,7 @@ static void ftp_send(int fd, const char *fmt,...){
 
     strcat(buf,"\r\n");
 
-    send(fd,buf,sizeof(buf),0);
+    send(fd,buf,strlen(buf),0);
     
 }
 
@@ -367,7 +413,7 @@ static int ftp_recv(int fd,char *buf,int maxlen){
         }
     }
 
-    buf[i]=='\0';
+    buf[i]='\0';
     return n;
 }
 
@@ -397,16 +443,16 @@ void *pasv_thread_func(void *arg) {
 
     data_thread_arg_t *data_thread_t =malloc(sizeof(data_thread_arg_t));
     //data_thread_t->cmd=data_t->cmd;
-    strcmp(data_thread_t->cmd,data_t->cmd);
+    strcpy(data_thread_t->cmd,data_t->cmd);
     data_thread_t->ctrl_fd=data_t->ctrl_fd;
     data_thread_t->data_fd=data_t->data_fd;
 
 
     pthread_t tid;
-    if(pthread_creat(&tid,NULL,data_thread_func,data_thread_t)==0){
+    if(pthread_create(&tid,NULL,data_thread_func,data_thread_t)==0){
         pthread_detach(tid);
     }else{
-        perror("pthread_create data");
+        perror("pthread_create ");
         close(data_t->data_fd);
         free(data_thread_t);
     }
@@ -427,14 +473,14 @@ void *data_thread_func(void *arg) {
         char path[MAX_PATH] = {0};
         if(strlen(cmd) > 5) sscanf(cmd+5, "%s", path);
         ftp_list(data_fd, path);
-    }if(strncmp(cmd,"RERT",4)==0){
+    }if(strncmp(cmd,"RETR",4)==0){
         char filename[MAX_PATH]={0};
         sscanf(cmd+5,"%s",filename);
-        ftp_rert();
+        ftp_retr(ctrl_fd,data_fd,filename);
     }if(strncmp(cmd,"STOR",4)==0){
         char filename[MAX_PATH]={0};
         sscanf(cmd+5,"%s",filename);
-        ftp_stor();
+        ftp_stor(ctrl_fd,data_fd,filename);
     }
 
     close(data_thread_t->data_fd);
@@ -445,22 +491,23 @@ void *data_thread_func(void *arg) {
 
 }
 
-void ftp_list(int data_fd,const char *path){
+/*void ftp_list(int data_fd,const char *path){
     DIR *dir;
     struct dirent *entry;
-    struct stat file_stat;
-    char full_path[MAX_PATH];
-    char buf[BUFSIZE];
-    char actual_path[BUFSIZ]={0};
+    //struct stat file_stat;
+    char full_path[MAX_PATH]={0};
+    char buf[BUFSIZE]={0};
+    char actual_path[MAX_PATH]={0};
 
     if(path==NULL || strlen(path)==0){
-        strcmp(actual_path,".");
+        strncpy(actual_path,".",MAX_PATH-1);
     }else{
-        strncmp(actual_path,path,MAX_PATH-1);//????/??
+        strncpy(actual_path,path,MAX_PATH-1);//????/??
     }
+    actual_path[MAX_PATH-1]='\0';
 
 
-    DIR *dir=opendir(actual_path);
+    dir=opendir(actual_path);
     if(!dir){
         snprintf(buf, sizeof(buf), "Failed to open directory: %s\r\n", actual_path);
         send(data_fd, buf, strlen(buf), 0);
@@ -469,7 +516,7 @@ void ftp_list(int data_fd,const char *path){
 
 
     while((entry = readdir(dir))!=NULL){
-        snprintf(full_path,sizeof(full_path),"%s/%s",entry->d_name);
+        snprintf(full_path,sizeof(full_path),"%s/%s\r\n",actual_path,entry->d_name);
         if(lstat(full_path,&file_stat) ==-1)  continue;
 
         const char *color=COLOR_RESET;
@@ -494,9 +541,130 @@ void ftp_list(int data_fd,const char *path){
 
 
     closedir(dir);
+}*/
+void ftp_list(int data_fd, const char *path) {
+    DIR *dir;
+    struct dirent *entry;
+    char full_path[MAX_PATH] = {0};
+    char buf[BUFSIZE] = {0};
+    char actual_path[MAX_PATH] = {0};
+
+    // 确定要列出的路径
+    if (path == NULL || strlen(path) == 0) {
+        strncpy(actual_path, ".", MAX_PATH - 1);
+    } else {
+        strncpy(actual_path, path, MAX_PATH - 1);
+    }
+    actual_path[MAX_PATH - 1] = '\0';
+
+    // 打开目录
+    dir = opendir(actual_path);
+    if (!dir) {
+        snprintf(buf, sizeof(buf), "Failed to open directory: %s\r\n", actual_path);
+        send(data_fd, buf, strlen(buf), 0);
+        return;
+    }
+
+    // 遍历目录条目并发送纯文本文件名
+    while ((entry = readdir(dir)) != NULL) {
+        // 跳过隐藏文件（如 . 和 ..）
+        if (entry->d_name[0] == '.') continue;
+
+        // 生成纯文本文件名条目（无颜色代码）
+        snprintf(buf, sizeof(buf), "%s\r\n", entry->d_name);
+        send(data_fd, buf, strlen(buf), 0);
+    }
+
+    closedir(dir);
+}
+
+void ftp_stor(int ctrl_fd,int data_fd,const char *filename){
+    char filepath[MAX_PATH];
+    //存储到当前目录
+    snprintf(filepath,"./%s",filename);
+
+    FILE *fp=fopen(filename,"wb");
+    if(!fp){
+        perror("fopen()");
+        ftp_send(ctrl_fd,"550 Failed to open file for writing.");
+        return;
+    }
+      
+    ssize_t n;
+    char buf[BUFSIZE];
+
+    while((n=recv(data_fd,buf,sizeof(buf),0))>0){
+        
+
+
+        if(fwrite(buf,1,n,fp) !=n){
+            perror("fwrite()");
+            ftp_send(ctrl_fd,"451 Write error.");
+            fclose(fp);
+            return;
+
+        }
+
+    }
+
+    fclose(fp);
+
+    if (n < 0) {
+        perror("recv");
+        ftp_send(ctrl_fd, "426 Connection closed; transfer aborted.");
+    } else {
+        ftp_send(ctrl_fd, "226 File transfer complete.");
+    }
 }
 
 
+void ftp_retr(int ctrl_fd,int data_fd,const char *filename){
+    char fullpath[MAX_PATH]={0};
+    char buf[BUFSIZE];
+
+    if(filename[0]=='/'){
+        snprintf(fullpath,sizeof(fullpath),"%s",filename);
+    }else{
+        snprintf(fullpath,sizeof(fullpath),"./%s",filename);
+    }
+
+    FILE *fp=fopen(fullpath,"rb");
+     if (!fp) {
+        snprintf(buf, sizeof(buf), "550 Failed to open file: %s\r\n", filename);
+        send(ctrl_fd, buf, strlen(buf), 0);
+        return;
+    }
+
+    int n;
+    while((n=fread(buf,1,sizeof(buf),fp)>0)){
+        if(send(data_fd,buf,n,0)<0){
+            perror("send file data");
+            break;
+        }
+
+    }
+
+    fclose(fp);
+
+
+}
+
+
+int threadpool_add(threadpool_t *pool,void *arg){
+    pthread_mutex_lock(&pool->lock);
+    if(pool->count==pool->queue_size){
+        pthread_mutex_unlock(&pool->lock);
+        return -1;
+    }
+    pool->task_args[pool->tail]=arg;
+    pool->tail=(pool->tail+1)%pool->queue_size;
+    pool->count++;
+    pthread_cond_signal(&pool->cond);
+    pthread_mutex_unlock(&pool->lock);
+    return 0;
+
+    
+}
 
 
 
