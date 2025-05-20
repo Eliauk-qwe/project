@@ -9,6 +9,9 @@
 #include <stdarg.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <pwd.h>
+#include <grp.h>
 
 
 #define CONTROL_PORT  2100
@@ -20,15 +23,6 @@
 #define MAX_USERNAME_LEN 32
 #define MAX_PASS_LEN 32
 #define MAX_PATH 512
-
-
-// ANSI颜色代码
-#define COLOR_RESET "\033[0m"
-#define COLOR_DIR "\033[1;34m"   // 蓝色目录
-#define COLOR_EXE "\033[1;32m"   // 绿色可执行文件
-#define COLOR_LINK "\033[1;36m"  // 青色符号链接
-#define COLOR_IMG "\033[1;33m"   // 黄色图片文件
-
 
 
 //线程池结构体
@@ -163,6 +157,20 @@ int main(){
 
     }
 
+    // 发送关闭信号
+    pool->shutdown = 1;
+    pthread_cond_broadcast(&pool->cond);  // 唤醒所有线程
+
+// 等待所有线程退出
+for (int i = 0; i < pool->thread_count; i++) {
+    pthread_join(pool->threads[i], NULL);
+}
+
+// 释放资源
+free(pool->threads);
+free(pool->task_args);
+free(pool);
+
 
     close(server_fd);
     return 0;
@@ -177,7 +185,7 @@ static int creat_listen_socket(int port){
     fd=socket(AF_INET,SOCK_STREAM,0);
     if(fd<0){
         perror("socket()");
-        return 1;
+        return -1;
     }
 
 
@@ -414,7 +422,7 @@ static int ftp_recv(int fd,char *buf,int maxlen){
     }
 
     buf[i]='\0';
-    return n;
+    return i;
 }
 
 int diff_user_pass(const char *user,const char *pass){
@@ -491,57 +499,9 @@ void *data_thread_func(void *arg) {
 
 }
 
-/*void ftp_list(int data_fd,const char *path){
-    DIR *dir;
-    struct dirent *entry;
-    //struct stat file_stat;
-    char full_path[MAX_PATH]={0};
-    char buf[BUFSIZE]={0};
-    char actual_path[MAX_PATH]={0};
-
-    if(path==NULL || strlen(path)==0){
-        strncpy(actual_path,".",MAX_PATH-1);
-    }else{
-        strncpy(actual_path,path,MAX_PATH-1);//????/??
-    }
-    actual_path[MAX_PATH-1]='\0';
 
 
-    dir=opendir(actual_path);
-    if(!dir){
-        snprintf(buf, sizeof(buf), "Failed to open directory: %s\r\n", actual_path);
-        send(data_fd, buf, strlen(buf), 0);
-        return;
-    }
 
-
-    while((entry = readdir(dir))!=NULL){
-        snprintf(full_path,sizeof(full_path),"%s/%s\r\n",actual_path,entry->d_name);
-        if(lstat(full_path,&file_stat) ==-1)  continue;
-
-        const char *color=COLOR_RESET;
-
-        if(S_ISDIR(file_stat.st_mode))   color=COLOR_DIR;
-        else if(S_ISLNK(file_stat.st_mode))  color=COLOR_LINK;
-        else if(file_stat.st_mode & S_IXUSR)  color=COLOR_EXE;
-        else{
-            const char *ext = strrchr(entry->d_name,'.');
-            if (ext && (
-                strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
-                strcasecmp(ext, ".png") == 0 || strcasecmp(ext, ".bmp") == 0 ||
-                strcasecmp(ext, ".gif") == 0
-            )) {
-                color = COLOR_IMG;
-            }
-        }
-
-        snprintf(buf,sizeof(buf),"%s%s%s\r\n",color,entry->d_name,COLOR_RESET);
-        send(data_fd,buf,strlen(buf),0);
-    }
-
-
-    closedir(dir);
-}*/
 void ftp_list(int data_fd, const char *path) {
     DIR *dir;
     struct dirent *entry;
@@ -549,15 +509,12 @@ void ftp_list(int data_fd, const char *path) {
     char buf[BUFSIZE] = {0};
     char actual_path[MAX_PATH] = {0};
 
-    // 确定要列出的路径
     if (path == NULL || strlen(path) == 0) {
         strncpy(actual_path, ".", MAX_PATH - 1);
     } else {
         strncpy(actual_path, path, MAX_PATH - 1);
     }
-    actual_path[MAX_PATH - 1] = '\0';
 
-    // 打开目录
     dir = opendir(actual_path);
     if (!dir) {
         snprintf(buf, sizeof(buf), "Failed to open directory: %s\r\n", actual_path);
@@ -565,13 +522,42 @@ void ftp_list(int data_fd, const char *path) {
         return;
     }
 
-    // 遍历目录条目并发送纯文本文件名
     while ((entry = readdir(dir)) != NULL) {
-        // 跳过隐藏文件（如 . 和 ..）
         if (entry->d_name[0] == '.') continue;
 
-        // 生成纯文本文件名条目（无颜色代码）
-        snprintf(buf, sizeof(buf), "%s\r\n", entry->d_name);
+        snprintf(full_path, sizeof(full_path), "%s/%s", actual_path, entry->d_name);
+
+        struct stat st;
+        if (stat(full_path, &st) == -1) continue;
+
+        // 文件类型和权限
+        char mode_str[11];
+        mode_str[0] = S_ISDIR(st.st_mode) ? 'd' : '-';
+        mode_str[1] = (st.st_mode & S_IRUSR) ? 'r' : '-';
+        mode_str[2] = (st.st_mode & S_IWUSR) ? 'w' : '-';
+        mode_str[3] = (st.st_mode & S_IXUSR) ? 'x' : '-';
+        mode_str[4] = (st.st_mode & S_IRGRP) ? 'r' : '-';
+        mode_str[5] = (st.st_mode & S_IWGRP) ? 'w' : '-';
+        mode_str[6] = (st.st_mode & S_IXGRP) ? 'x' : '-';
+        mode_str[7] = (st.st_mode & S_IROTH) ? 'r' : '-';
+        mode_str[8] = (st.st_mode & S_IWOTH) ? 'w' : '-';
+        mode_str[9] = (st.st_mode & S_IXOTH) ? 'x' : '-';
+        mode_str[10] = '\0';
+
+        // 用户名、组名
+        struct passwd *pw = getpwuid(st.st_uid);
+        struct group  *gr = getgrgid(st.st_gid);
+        const char *uname = pw ? pw->pw_name : "unknown";
+        const char *gname = gr ? gr->gr_name : "unknown";
+
+        // 修改时间
+        char time_str[20];
+        strftime(time_str, sizeof(time_str), "%b %d %H:%M", localtime(&st.st_mtime));
+
+        // 格式化输出
+        snprintf(buf, sizeof(buf), "%s 1 %s %s %10ld %s %s\r\n",
+                 mode_str, uname, gname, (long)st.st_size, time_str, entry->d_name);
+
         send(data_fd, buf, strlen(buf), 0);
     }
 
@@ -581,7 +567,7 @@ void ftp_list(int data_fd, const char *path) {
 void ftp_stor(int ctrl_fd,int data_fd,const char *filename){
     char filepath[MAX_PATH];
     //存储到当前目录
-    snprintf(filepath,"./%s",filename);
+    snprintf(filepath,sizeof(filepath),"./%s",filename);
 
     FILE *fp=fopen(filename,"wb");
     if(!fp){
@@ -636,7 +622,7 @@ void ftp_retr(int ctrl_fd,int data_fd,const char *filename){
     }
 
     int n;
-    while((n=fread(buf,1,sizeof(buf),fp)>0)){
+    while((n=fread(buf,1,sizeof(buf),fp))>0){
         if(send(data_fd,buf,n,0)<0){
             perror("send file data");
             break;
@@ -665,11 +651,5 @@ int threadpool_add(threadpool_t *pool,void *arg){
 
     
 }
-
-
-
-
-
-
 
 

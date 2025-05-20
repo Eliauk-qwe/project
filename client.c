@@ -3,215 +3,309 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <errno.h>
 
-#define CONTROL_PORT 2100
-#define BUFFER_SIZE 1024
+#define SERVER_IP "127.0.0.1"    // 修改为服务器IP
+#define SERVER_PORT 2100         // 控制端口
+#define BUF_SIZE 1024
 
-int parse_pasv_response(char *response, char *ip, int *port) {
-    int h1, h2, h3, h4, p1, p2;
-    if (sscanf(response, "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)",
-               &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
-        return -1;
-    }
-    sprintf(ip, "%d.%d.%d.%d", h1, h2, h3, h4);
-    *port = p1 * 256 + p2;
-    return 0;
+// 读取服务器响应，返回第一个数字状态码
+int read_response(int sockfd, char *response, size_t size) {
+    ssize_t n = read(sockfd, response, size - 1);
+    if (n <= 0) return -1;
+    response[n] = '\0';
+    printf("Server: %s", response);
+    return atoi(response);
 }
 
-int connect_to_server(const char *ip, int port) {
-    int sockfd;
-    struct sockaddr_in server_addr;
+// 连接到服务器控制端口
+int connect_control() {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); return -1; }
+    struct sockaddr_in servaddr = {0};
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(SERVER_PORT);
+    inet_pton(AF_INET, SERVER_IP, &servaddr.sin_addr);
 
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket creation failed");
-        return -1;
-    }
-
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
-        perror("Invalid address");
+    if (connect(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+        perror("connect");
         close(sockfd);
         return -1;
     }
-
-    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Connection failed");
-        close(sockfd);
-        return -1;
-    }
-
     return sockfd;
 }
 
-int send_command(int sockfd, const char *cmd, char *response) {
-    char buffer[BUFFER_SIZE];
-    snprintf(buffer, sizeof(buffer), "%s\r\n", cmd);
-    if (send(sockfd, buffer, strlen(buffer), 0) < 0) {
-        perror("Send failed");
+// 发送命令并读取响应
+int send_command(int sockfd, const char *cmd, char *response, size_t resp_size) {
+    if (write(sockfd, cmd, strlen(cmd)) < 0) {
+        perror("write");
         return -1;
     }
-
-    int total_len = 0;
-    while (1) {
-        int len = recv(sockfd, response + total_len, BUFFER_SIZE - 1 - total_len, 0);
-        if (len <= 0) break;
-        total_len += len;
-        response[total_len] = '\0';
-        if (strstr(response, "\r\n") != NULL) break;
-    }
-    return 0;
+    return read_response(sockfd, response, resp_size);
 }
 
-int handle_list(int control_sock) {
-    char response[BUFFER_SIZE];
-    char ip[64];
-    int port;
+// 解析PASV响应，提取数据端口
+// 格式: 227 entering passive mode (h1,h2,h3,h4,p1,p2)
+int parse_pasv_response(const char *response, char *ip, size_t ip_size) {
+    int h1,h2,h3,h4,p1,p2;
+    const char *p = strchr(response, '(');
+    if (!p) return -1;
+    sscanf(p, "(%d,%d,%d,%d,%d,%d)", &h1,&h2,&h3,&h4,&p1,&p2);
+    snprintf(ip, ip_size, "%d.%d.%d.%d", h1,h2,h3,h4);
+    return p1*256 + p2;
+}
 
-    // 1. 发送 PASV 命令并解析响应
-    if (send_command(control_sock, "PASV", response) < 0) return -1;
-    if (parse_pasv_response(response, ip, &port) < 0) {
-        fprintf(stderr, "Failed to parse PASV response\n");
+// 连接数据端口
+int connect_data(const char *ip, int port) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); return -1; }
+    struct sockaddr_in dataaddr = {0};
+    dataaddr.sin_family = AF_INET;
+    dataaddr.sin_port = htons(port);
+    inet_pton(AF_INET, ip, &dataaddr.sin_addr);
+
+    if (connect(sockfd, (struct sockaddr*)&dataaddr, sizeof(dataaddr)) < 0) {
+        perror("connect data");
+        close(sockfd);
+        return -1;
+    }
+    return sockfd;
+}
+
+// 列出文件列表（LIST命令）
+int ftp_list(int ctrl_sock, const char *path) {
+    char response[BUF_SIZE];
+    char cmd[BUF_SIZE];  // 增大缓冲区以容纳路径
+
+    // 发送 PASV 命令
+    if (send_command(ctrl_sock, "PASV\r\n", response, sizeof(response)) != 227) {
+        fprintf(stderr, "PASV failed\n");
         return -1;
     }
 
-    // 2. 先连接数据端口
-    int data_sock = connect_to_server(ip, port);
+    // 解析数据端口
+    char data_ip[32];
+    int data_port = parse_pasv_response(response, data_ip, sizeof(data_ip));
+    if (data_port < 0) {
+        fprintf(stderr, "Parse PASV failed\n");
+        return -1;
+    }
+
+    // 连接数据端口
+    int data_sock = connect_data(data_ip, data_port);
     if (data_sock < 0) return -1;
 
-    // 3. 再发送 LIST 命令
-    if (send_command(control_sock, "LIST", response) < 0) {
+    // 发送带路径的 LIST 命令（例如 "LIST /home/user\r\n"）
+    if (strlen(path) == 0) {
+        snprintf(cmd, sizeof(cmd), "LIST\r\n");
+    } else {
+        snprintf(cmd, sizeof(cmd), "LIST %s\r\n", path);
+    }
+
+    if (send_command(ctrl_sock, cmd, response, sizeof(response)) != 150) {
+        fprintf(stderr, "LIST command failed\n");
         close(data_sock);
         return -1;
     }
 
-    // 4. 接收数据
-    int len;
-    while ((len = recv(data_sock, response, BUFFER_SIZE - 1, 0)) > 0) {
-        response[len] = '\0';
+    // 读取数据连接传来的文件列表
+    ssize_t n;
+    while ((n = read(data_sock, response, sizeof(response) - 1)) > 0) {
+        response[n] = '\0';
         printf("%s", response);
     }
 
     close(data_sock);
+    // 读取完成响应
+    read_response(ctrl_sock, response, sizeof(response));
+    return 0;
+}
+// 下载文件（RETR命令）
+int ftp_retr(int ctrl_sock, const char *filename) {
+    char response[BUF_SIZE];
+    char cmd[256];
+
+    // 进入被动模式
+    snprintf(cmd, sizeof(cmd), "PASV\r\n");
+    if (send_command(ctrl_sock, cmd, response, sizeof(response)) != 227) {
+        fprintf(stderr, "PASV failed\n");
+        return -1;
+    }
+
+    char data_ip[32];
+    int data_port = parse_pasv_response(response, data_ip, sizeof(data_ip));
+    if (data_port < 0) {
+        fprintf(stderr, "Parse PASV failed\n");
+        return -1;
+    }
+
+    int data_sock = connect_data(data_ip, data_port);
+    if (data_sock < 0) return -1;
+
+    snprintf(cmd, sizeof(cmd), "RETR %s\r\n", filename);
+    if (send_command(ctrl_sock, cmd, response, sizeof(response)) != 150) {
+        fprintf(stderr, "RETR command failed\n");
+        close(data_sock);
+        return -1;
+    }
+
+    FILE *fp = fopen(filename, "wb");
+    if (!fp) {
+        perror("fopen");
+        close(data_sock);
+        return -1;
+    }
+
+    ssize_t n;
+    while ((n = read(data_sock, response, sizeof(response))) > 0) {
+        fwrite(response, 1, n, fp);
+    }
+    fclose(fp);
+    close(data_sock);
+
+    // 读取传输完成响应
+    read_response(ctrl_sock, response, sizeof(response));
     return 0;
 }
 
-int handle_retr(int control_sock, const char *filename) {
-    char response[BUFFER_SIZE];
-    char ip[64];
-    int port;
+// 上传文件（STOR命令）
+int ftp_stor(int ctrl_sock, const char *filename) {
+    char response[BUF_SIZE];
+    char cmd[256];
 
-    // 1. 发送 PASV 命令并解析响应
-    if (send_command(control_sock, "PASV", response) < 0) return -1;
-    if (parse_pasv_response(response, ip, &port) < 0) {
-        fprintf(stderr, "Failed to parse PASV response\n");
+    // 进入被动模式
+    snprintf(cmd, sizeof(cmd), "PASV\r\n");
+    if (send_command(ctrl_sock, cmd, response, sizeof(response)) != 227) {
+        fprintf(stderr, "PASV failed\n");
         return -1;
     }
 
-    // 2. 先连接数据端口
-    int data_sock = connect_to_server(ip, port);
+    char data_ip[32];
+    int data_port = parse_pasv_response(response, data_ip, sizeof(data_ip));
+    if (data_port < 0) {
+        fprintf(stderr, "Parse PASV failed\n");
+        return -1;
+    }
+
+    int data_sock = connect_data(data_ip, data_port);
     if (data_sock < 0) return -1;
 
-    // 3. 再发送 RETR 命令
-    char cmd[BUFFER_SIZE];
-    snprintf(cmd, sizeof(cmd), "RETR %s", filename);
-    if (send_command(control_sock, cmd, response) < 0) {
+    snprintf(cmd, sizeof(cmd), "STOR %s\r\n", filename);
+    if (send_command(ctrl_sock, cmd, response, sizeof(response)) != 150) {
+        fprintf(stderr, "STOR command failed\n");
         close(data_sock);
         return -1;
     }
 
-    // 4. 接收文件数据
-    int file_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (file_fd < 0) {
-        perror("File open failed");
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        perror("fopen");
         close(data_sock);
         return -1;
     }
 
-    int len;
-    while ((len = recv(data_sock, response, BUFFER_SIZE, 0)) > 0) {
-        write(file_fd, response, len);
+    ssize_t n;
+    while ((n = fread(response, 1, sizeof(response), fp)) > 0) {
+        if (write(data_sock, response, n) != n) {
+            perror("write data");
+            fclose(fp);
+            close(data_sock);
+            return -1;
+        }
     }
 
-    close(file_fd);
+    fclose(fp);
     close(data_sock);
-    return 0;
-}
 
-int handle_stor(int control_sock, const char *filename) {
-    char response[BUFFER_SIZE];
-    char ip[64];
-    int port;
-
-    // 1. 发送 PASV 命令并解析响应
-    if (send_command(control_sock, "PASV", response) < 0) return -1;
-    if (parse_pasv_response(response, ip, &port) < 0) {
-        fprintf(stderr, "Failed to parse PASV response\n");
-        return -1;
-    }
-
-    // 2. 先连接数据端口
-    int data_sock = connect_to_server(ip, port);
-    if (data_sock < 0) return -1;
-
-    // 3. 再发送 STOR 命令
-    char cmd[BUFFER_SIZE];
-    snprintf(cmd, sizeof(cmd), "STOR %s", filename);
-    if (send_command(control_sock, cmd, response) < 0) {
-        close(data_sock);
-        return -1;
-    }
-
-    // 4. 发送文件数据
-    int file_fd = open(filename, O_RDONLY);
-    if (file_fd < 0) {
-        perror("File open failed");
-        close(data_sock);
-        return -1;
-    }
-
-    int len;
-    while ((len = read(file_fd, response, BUFFER_SIZE)) > 0) {
-        send(data_sock, response, len, 0);
-    }
-
-    close(file_fd);
-    close(data_sock);
+    // 读取传输完成响应
+    read_response(ctrl_sock, response, sizeof(response));
     return 0;
 }
 
 int main() {
-    const char *server_ip = "127.0.0.1";
-    int control_sock = connect_to_server(server_ip, CONTROL_PORT);
-    if (control_sock < 0) return -1;
-
-    char response[BUFFER_SIZE];
-    recv(control_sock, response, BUFFER_SIZE - 1, 0);
-    printf("%s", response);
-
-    char cmd[BUFFER_SIZE], arg[256];
-    while (1) {
-        printf("ftp> ");
-        fflush(stdout);
-
-        if (fgets(cmd, sizeof(cmd), stdin) == NULL) break;
-        cmd[strcspn(cmd, "\n")] = '\0';
-
-        if (strcmp(cmd, "LIST") == 0) {
-            handle_list(control_sock);
-        } else if (sscanf(cmd, "RETR %255s", arg) == 1) {
-            handle_retr(control_sock, arg);
-        } else if (sscanf(cmd, "STOR %255s", arg) == 1) {
-            handle_stor(control_sock, arg);
-        } else if (strcmp(cmd, "QUIT") == 0) {
-            send_command(control_sock, "QUIT", response);
-            break;
-        } else {
-            printf("500 Unknown command\r\n");
-        }
+    int ctrl_sock = connect_control();
+    if (ctrl_sock < 0) {
+        fprintf(stderr, "Failed to connect control socket\n");
+        return 1;
     }
 
-    close(control_sock);
+    char response[BUF_SIZE];
+    // 读取欢迎信息
+    if (read_response(ctrl_sock, response, sizeof(response)) != 220) {
+        fprintf(stderr, "Did not receive welcome message\n");
+        close(ctrl_sock);
+        return 1;
+    }
+
+    // 用户登录
+    char user_cmd[64], pass_cmd[64];
+    printf("Username: ");
+    char username[64], password[64];
+    fgets(username, sizeof(username), stdin);
+    username[strcspn(username, "\r\n")] = 0; // 去掉换行
+
+    snprintf(user_cmd, sizeof(user_cmd), "USER %s\r\n", username);
+    if (send_command(ctrl_sock, user_cmd, response, sizeof(response)) != 331) {
+        fprintf(stderr, "USER command failed\n");
+        close(ctrl_sock);
+        return 1;
+    }
+
+    printf("Password: ");
+    fgets(password, sizeof(password), stdin);
+    password[strcspn(password, "\r\n")] = 0;
+
+    snprintf(pass_cmd, sizeof(pass_cmd), "PASS %s\r\n", password);
+    if (send_command(ctrl_sock, pass_cmd, response, sizeof(response)) != 230) {
+        fprintf(stderr, "PASS command failed\n");
+        close(ctrl_sock);
+        return 1;
+    }
+
+    printf("Login successful!\n");
+
+    // 简单交互菜单
+    while (1) {
+        printf("\nCommands:\n");
+        printf("1. LIST\n");
+        printf("2. RETR <filename>\n");
+        printf("3. STOR <filename>\n");
+        printf("4. QUIT\n");
+        printf("Enter choice: ");
+
+        char choice[128];
+        if (!fgets(choice, sizeof(choice), stdin)) break;
+        int cmd = atoi(choice);
+
+        // 修改后的菜单处理逻辑
+if (cmd == 1) {  // LIST 命令
+    printf("Enter directory path (leave empty for current dir): ");
+    char path[256];
+    if (!fgets(path, sizeof(path), stdin)) break;
+    path[strcspn(path, "\r\n")] = 0;  // 去掉换行符
+    ftp_list(ctrl_sock, path);        // 传递路径参数
+} else if (cmd == 2) {  // RETR 命令
+    printf("Enter filename to download: ");
+    char fname[256];
+    if (!fgets(fname, sizeof(fname), stdin)) break;
+    fname[strcspn(fname, "\r\n")] = 0;
+    ftp_retr(ctrl_sock, fname);
+} else if (cmd == 3) {  // STOR 命令
+    printf("Enter filename to upload: ");
+    char fname[256];
+    if (!fgets(fname, sizeof(fname), stdin)) break;
+    fname[strcspn(fname, "\r\n")] = 0;
+    ftp_stor(ctrl_sock, fname);
+} else if (cmd == 4) {  // QUIT 命令
+    send_command(ctrl_sock, "QUIT\r\n", response, sizeof(response));
+    close(ctrl_sock);
+    exit(0);  // 保证不再继续循环
+}
+    }
+
+    close(ctrl_sock);
     return 0;
 }
