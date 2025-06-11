@@ -86,7 +86,7 @@ public:
         int count=0;
 
         while(left>0){
-            nsend=send(fd,&buf,left,0);
+            nsend=send(fd,buf,left,0);
             if(nsend<0){
                 if(errno==EINTR || errno==EWOULDBLOCK) continue;
                 else{
@@ -103,7 +103,7 @@ public:
             count=count+nsend;
 
         }
-        close (fd);
+        //close (fd);
         delete [] msg;
         return count;
 
@@ -112,27 +112,40 @@ public:
     //服务端接受函数
     int server_recv(int cfd,char **msg){
         int len=0;
-        readn(cfd,(char *)len,4);
+        // 1. 读取长度头（严格检查4字节）
+        if(readn(cfd,(char *)&len,4)  !=4){
+            close(cfd);
+            return -1;
+        };
         len=ntohl(len);
-
-        //char *msg =new char[message_len+4];
+        
         char *buf=new char[len+1];
         int nread=readn(cfd,buf,len);
-        if(nread!=len){
-            cout << "数据读取失败" <<endl;
-        }else if(nread==0){
-            cout <<to_string(cfd) << "断开连接" <<endl;//======================
-            close(cfd);
+
+
+        // 3. 处理读取结果
+        if (nread != len) {
+            delete[] buf;  // 释放内存
+            if (nread == 0) {
+                cout <<to_string(cfd) << "断开连接" <<endl;
+                close(cfd);  // 客户端断开
+                return 0;
+            }
+        
+            cout << "数据不完整，关闭连接" <<endl;
+            close(cfd);      // 数据不完整，关闭连接
+            return -1;       // 返回错误
         }
+
         buf[len]='\0';
-        *msg=buf;
+        *msg=buf;//通过参数返回消息
         return nread;
-        //============================return meg????
+        
     }
 
 
     //客户端接受
-    string client_recv(){
+    /*string client_recv(){
         // === 第一步：接收4字节消息头（长度信息） ===
         int len=0;
         char *head_buf=new char[4];
@@ -189,6 +202,41 @@ public:
         delete [] buf;
         return msg;
 
+    }*/
+
+
+    string client_recv(){
+        int len=0;
+        // 1. 读取长度头（严格检查4字节）
+        if(readn(fd,(char *)&len,4)  !=4){
+            close(fd);
+            return "读取消息头不完整";
+        };
+        len=ntohl(len);
+        
+        char *buf=new char[len+1];
+        int nread=readn(fd,buf,len);
+
+
+        // 3. 处理读取结果
+        if (nread != len) {
+            delete[] buf;  // 释放内存
+            if (nread == 0) {
+                cout <<to_string(fd) << "断开连接" <<endl;
+                close(fd);  // 客户端断开
+                return "断开连接";
+            }
+        
+            cout << "数据不完整，关闭连接" <<endl;
+            close(fd);      // 数据不完整，关闭连接
+            return "数据不完整，关闭连接";       // 返回错误
+        }
+
+        buf[len]='\0';
+        //*msg=buf;//通过参数返回消息
+        string msg(buf);
+        return msg;
+        
     }
 };
 
