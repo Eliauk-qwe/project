@@ -6,12 +6,17 @@
 #include <sys/epoll.h>
 #include "../ThreadPool.hpp"
 #include <fcntl.h>
+#include <../StickyPacket.hpp>
+#include <../3.hpp>
+#include <MessageTrans.hpp>
 
 
 using namespace std;
 
 #define LISTEN_NUM 150
 #define MAX_EVENTS 1024
+
+MessageTrans trans;
 
 // 设置文件描述符为非阻塞模式
 void setnoblock(int fd){
@@ -26,6 +31,8 @@ void setnoblock(int fd){
         exit(EXIT_FAILURE);
     }
 }
+
+void client_exit(int fd);
 
 
 
@@ -49,14 +56,14 @@ int  main(int argc,char *argv[]){
     memset(&server_addr,0,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
     //server_addr.sin_addr.s_addr=htonl(argv[1]);
-    if(inet_pton(AF_INET,argv[1],(sockaddr*)&server_addr)  <=0){
+    if(inet_pton(AF_INET,argv[1],(sockaddr*)&server_addr.sin_addr.s_addr)  <=0){
         cerr << "Invailed  server IP " << endl;
         close(server_fd);
         exit(EXIT_FAILURE);
 
     }
     uint32_t port=stoi(argv[2]);
-    server_addr.sin_port=htonl(port);
+    server_addr.sin_port=htons(port); //htonl->htons
 
     //允许端口复用
     int opt=1;
@@ -110,7 +117,7 @@ int  main(int argc,char *argv[]){
 
 
    //线程池，创建10个线程
-   ThreadPool(10);
+   ThreadPool pool(10);
 
    cout << "服务器开始工作" << endl;
 
@@ -134,20 +141,63 @@ int  main(int argc,char *argv[]){
         for(int i=0;i<count;i++){
             int fd = events[i].data.fd;
               
-            //i=0,服务端接受客户端的连接  
+            //i=0,服务端接受客户端的连接,新客户端连接  
             if(fd==server_fd){
                 sockaddr_in client_addr;
                 socklen_t client_len =sizeof(client_addr);
-                int client_fd=accept(server_fd,(sockaddr*)&client_addr,&client_len);
+                int new_fd=accept(server_fd,(sockaddr*)&client_addr,&client_len);
+                if (new_fd == -1) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        perror("accept");
+                    }
+                }
+                printf("New connection: socket %d\n", new_fd);
 
-                setnoblock(client_fd);
+
+                setnoblock(new_fd);
                 struct epoll_event client_ev;
-                client_ev.data.fd=client_fd;
+                client_ev.data.fd=new_fd;
                 client_ev.events=EPOLLIN | EPOLLET;
-                if(epoll_ctl(epoll_fd,EPOLL_CTL_ADD,client_fd,&client_ev) < 0 ){
+                if(epoll_ctl(epoll_fd,EPOLL_CTL_ADD,new_fd,&client_ev) < 0 ){
                     cerr << "epoll_ctl" <<endl;
                     exit(EXIT_FAILURE);
                 }
+
+            }
+            //开始干活啦！
+            else if(events[i].events & EPOLLIN){
+                StickyPacket sp_fd(fd);
+                char *buf;
+                if(sp_fd.server_recv(fd,&buf) <=0){
+                    //没有接受到客户端任何信息
+                    client_exit(fd);
+                    continue;
+                }
+
+                //buf中为客户端请求的命令
+                string client_cmd = buf;
+                cout << "客户端" << " "<< fd << "" << "的新请求为" << client_cmd <<endl
+                     <<endl;
+
+                Message msg;
+                msg.Json_to_s(client_cmd);
+                if(msg.flag == RECV){
+
+                }
+                else if(msg.flag==FILE){
+
+                }else{
+                    StickyPacket socket(fd);
+                    Task task([socket,client_cmd](){
+                        trans.translation(socket,client_cmd);
+                    });
+                    pool.addTask(task);
+                    
+                }
+
+                
+
+
 
             }
         }
